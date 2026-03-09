@@ -290,6 +290,10 @@ branch_and_bound_t<i_t, f_t>::branch_and_bound_t(
 template <typename i_t, typename f_t>
 f_t branch_and_bound_t<i_t, f_t>::get_lower_bound()
 {
+  if (solving_root_relaxation_.load()) {
+    f_t root = root_lp_current_lower_bound_.load();
+    return std::isfinite(root) ? root : -inf;
+  }
   f_t lower_bound      = lower_bound_ceiling_.load();
   f_t heap_lower_bound = node_queue_.get_lower_bound();
   lower_bound          = std::min(heap_lower_bound, lower_bound);
@@ -307,21 +311,21 @@ f_t branch_and_bound_t<i_t, f_t>::get_lower_bound()
 template <typename i_t, typename f_t>
 void branch_and_bound_t<i_t, f_t>::report_heuristic(f_t obj)
 {
-  if (is_running_) {
-    f_t user_obj   = compute_user_objective(original_lp_, obj);
-    f_t lower      = get_lower_bound();
-    f_t user_lower = std::isfinite(lower) ? compute_user_objective(original_lp_, lower) : -inf;
-    if (exploration_stats_.nodes_explored == 0) {
-      f_t root_progress          = root_lp_current_lower_bound_.load();
-      const bool is_maximization = original_lp_.obj_scale < 0.0;
-      if (std::isfinite(root_progress) &&
-          (!std::isfinite(user_lower) ||
-           (is_maximization ? root_progress < user_lower : root_progress > user_lower))) {
-        user_lower = root_progress;
-      }
+  const f_t user_obj = compute_user_objective(original_lp_, obj);
+  f_t lower          = get_lower_bound();
+  f_t user_lower     = std::isfinite(lower) ? compute_user_objective(original_lp_, lower) : -inf;
+  if (!solving_root_relaxation_.load() && exploration_stats_.nodes_explored == 0) {
+    f_t root_progress          = root_lp_current_lower_bound_.load();
+    const bool is_maximization = original_lp_.obj_scale < 0.0;
+    if (std::isfinite(root_progress) &&
+        (!std::isfinite(user_lower) ||
+         (is_maximization ? root_progress < user_lower : root_progress > user_lower))) {
+      user_lower = root_progress;
     }
-    std::string user_gap = user_mip_gap<f_t>(user_obj, user_lower);
+  }
 
+  if (is_running_) {
+    std::string user_gap = user_mip_gap<f_t>(user_obj, user_lower);
     settings_.log.printf(
       "H                            %+13.6e    %+10.6e                               %s %9.2f\n",
       user_obj,
@@ -329,10 +333,6 @@ void branch_and_bound_t<i_t, f_t>::report_heuristic(f_t obj)
       user_gap.c_str(),
       toc(exploration_stats_.start_time));
   } else {
-    f_t user_obj   = compute_user_objective(original_lp_, obj);
-    f_t lower      = get_lower_bound();
-    f_t user_lower = std::isfinite(lower) ? compute_user_objective(original_lp_, lower)
-                                          : root_lp_current_lower_bound_.load();
     std::string gap_str =
       std::isfinite(user_lower) ? (". Gap: " + user_mip_gap<f_t>(user_obj, user_lower)) : "";
     settings_.log.printf("New solution from primal heuristics. Objective %+.6e%s. Time %.2f\n",
@@ -1961,6 +1961,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
   log.log_prefix                      = settings_.log.log_prefix;
   solver_status_                      = mip_status_t::UNSET;
   is_running_                         = false;
+  solving_root_relaxation_            = false;
   lower_bound_ceiling_                = inf;
   root_lp_current_lower_bound_        = -inf;
   root_objective_                     = std::numeric_limits<f_t>::quiet_NaN();
@@ -1988,12 +1989,13 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
 
   root_relax_soln_.resize(original_lp_.num_rows, original_lp_.num_cols);
 
-  i_t original_rows                     = original_lp_.num_rows;
-  simplex_solver_settings_t lp_settings = settings_;
-  lp_settings.inside_mip                = 1;
-  lp_settings.scale_columns             = false;
-  lp_settings.concurrent_halt           = get_root_concurrent_halt();
-  lp_settings.root_lp_progress_callback = [this](f_t user_obj) {
+  solving_root_relaxation_                    = true;
+  i_t original_rows                           = original_lp_.num_rows;
+  simplex_solver_settings_t lp_settings       = settings_;
+  lp_settings.inside_mip                      = 1;
+  lp_settings.scale_columns                   = false;
+  lp_settings.concurrent_halt                 = get_root_concurrent_halt();
+  lp_settings.dual_simplex_objective_callback = [this](f_t user_obj) {
     root_lp_current_lower_bound_.store(user_obj);
   };
   std::vector<i_t> basic_list(original_lp_.num_rows);
@@ -2027,6 +2029,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
   exploration_stats_.total_lp_solve_time = toc(exploration_stats_.start_time);
 
   if (root_status == lp_status_t::INFEASIBLE) {
+    solving_root_relaxation_ = false;
     settings_.log.printf("MIP Infeasible\n");
     // FIXME: rarely dual simplex detects infeasible whereas it is feasible.
     // to add a small safety net, check if there is a primal solution already.
@@ -2037,6 +2040,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
     return mip_status_t::INFEASIBLE;
   }
   if (root_status == lp_status_t::UNBOUNDED) {
+    solving_root_relaxation_ = false;
     settings_.log.printf("MIP Unbounded\n");
     if (settings_.heuristic_preemption_callback != nullptr) {
       settings_.heuristic_preemption_callback();
@@ -2044,19 +2048,22 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
     return mip_status_t::UNBOUNDED;
   }
   if (root_status == lp_status_t::TIME_LIMIT) {
-    solver_status_ = mip_status_t::TIME_LIMIT;
+    solving_root_relaxation_ = false;
+    solver_status_           = mip_status_t::TIME_LIMIT;
     set_final_solution(solution, -inf);
     return solver_status_;
   }
 
   if (root_status == lp_status_t::WORK_LIMIT) {
-    solver_status_ = mip_status_t::WORK_LIMIT;
+    solving_root_relaxation_ = false;
+    solver_status_           = mip_status_t::WORK_LIMIT;
     set_final_solution(solution, -inf);
     return solver_status_;
   }
 
   if (root_status == lp_status_t::NUMERICAL_ISSUES) {
-    solver_status_ = mip_status_t::NUMERICAL;
+    solving_root_relaxation_ = false;
+    solver_status_           = mip_status_t::NUMERICAL;
     set_final_solution(solution, -inf);
     return solver_status_;
   }
@@ -2087,6 +2094,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
   cut_info_t<i_t, f_t> cut_info;
 
   if (num_fractional == 0) {
+    solving_root_relaxation_ = false;
     set_solution_at_root(solution, cut_info);
     return mip_status_t::OPTIMAL;
   }
@@ -2117,6 +2125,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
   i_t cut_pool_size = 0;
   for (i_t cut_pass = 0; cut_pass < settings_.max_cut_passes; cut_pass++) {
     if (num_fractional == 0) {
+      solving_root_relaxation_ = false;
       set_solution_at_root(solution, cut_info);
       return mip_status_t::OPTIMAL;
     } else {
@@ -2278,7 +2287,8 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
         settings_.log.debug("Dual phase2 time %.2f seconds\n", dual_phase2_time);
       }
       if (cut_status == dual::status_t::TIME_LIMIT) {
-        solver_status_ = mip_status_t::TIME_LIMIT;
+        solving_root_relaxation_ = false;
+        solver_status_           = mip_status_t::TIME_LIMIT;
         set_final_solution(solution, root_objective_);
         return solver_status_;
       }
@@ -2301,6 +2311,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
           exploration_stats_.total_lp_iters += root_relax_soln_.iterations;
           root_objective_ = compute_objective(original_lp_, root_relax_soln_.x);
         } else {
+          solving_root_relaxation_ = false;
           settings_.log.printf("Cut status %s\n", dual::status_to_string(cut_status).c_str());
           return mip_status_t::NUMERICAL;
         }
@@ -2343,6 +2354,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
       f_t rel_gap = user_relative_gap(original_lp_, upper_bound_.load(), root_objective_);
       f_t abs_gap = upper_bound_.load() - root_objective_;
       if (rel_gap < settings_.relative_mip_gap_tol || abs_gap < settings_.absolute_mip_gap_tol) {
+        solving_root_relaxation_ = false;
         set_solution_at_root(solution, cut_info);
         set_final_solution(solution, root_objective_);
         return mip_status_t::OPTIMAL;
@@ -2362,6 +2374,7 @@ mip_status_t branch_and_bound_t<i_t, f_t>::solve(mip_solution_t<i_t, f_t>& solut
     }
   }
 
+  solving_root_relaxation_ = false;
   print_cut_info(settings_, cut_info);
 
   if (cut_info.has_cuts()) {

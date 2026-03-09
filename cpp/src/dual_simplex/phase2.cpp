@@ -3510,19 +3510,20 @@ dual::status_t dual_phase2_with_advanced_basis(i_t phase,
 
     if ((iter - start_iter) < settings.first_iteration_log ||
         (iter % settings.iteration_log_frequency) == 0) {
+      const f_t user_obj = compute_user_objective(lp, obj);
       if (phase == 1 && iter == 1) {
         settings.log.printf(" Iter     Objective           Num Inf.  Sum Inf.     Perturb  Time\n");
       }
       settings.log.printf("%5d %+.16e %7d %.8e %.2e %.2f\n",
                           iter,
-                          compute_user_objective(lp, obj),
+                          user_obj,
                           infeasibility_indices.size(),
                           primal_infeasibility_squared,
                           sum_perturb,
                           now);
-    }
-    if (phase == 2 && settings.inside_mip == 1 && settings.root_lp_progress_callback) {
-      settings.root_lp_progress_callback(compute_user_objective(lp, obj));
+      if (phase == 2 && settings.inside_mip == 1 && settings.dual_simplex_objective_callback) {
+        settings.dual_simplex_objective_callback(user_obj);
+      }
     }
 
     if (obj >= settings.cut_off) {
