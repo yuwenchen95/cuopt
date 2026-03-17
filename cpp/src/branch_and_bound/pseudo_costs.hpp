@@ -522,12 +522,17 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                       const simplex_solver_settings_t<i_t, f_t>& settings,
                       f_t start_time,
                       const std::vector<variable_type_t>& var_types,
-                      const std::vector<f_t> root_soln,
+                      const std::vector<f_t>& root_x,
+                      const std::vector<f_t>& root_y,
+                      const std::vector<f_t>& root_z,
                       const std::vector<i_t>& fractional,
                       f_t root_obj,
                       f_t upper_bound,
                       const std::vector<variable_status_t>& root_vstatus,
                       const std::vector<f_t>& edge_norms,
+                      const std::vector<i_t>& basic_list,
+                      const std::vector<i_t>& nonbasic_list,
+                      basis_update_mpf_t<i_t, f_t>& basis_factors,
                       pseudo_costs_t<i_t, f_t>& pc);
 
 }  // namespace cuopt::linear_programming::dual_simplex

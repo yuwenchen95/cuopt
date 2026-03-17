@@ -22,6 +22,256 @@ namespace cuopt::linear_programming::dual_simplex {
 
 namespace {
 
+
+template <typename f_t>
+struct objective_estimate_t {
+  f_t down_obj;
+  f_t up_obj;
+};
+
+template <typename i_t, typename f_t>
+f_t compute_step_length(const simplex_solver_settings_t<i_t, f_t>& settings,
+                        const std::vector<variable_status_t>& vstatus,
+                        const std::vector<f_t>& z,
+                        const std::vector<f_t>& delta_z,
+                        const std::vector<i_t>& delta_z_indices)
+{
+  f_t step_length = inf;
+  f_t pivot_tol = settings.pivot_tol;
+  const i_t nz = delta_z_indices.size();
+  for (i_t h = 0; h < nz; h++) {
+    const i_t j = delta_z_indices[h];
+    if (vstatus[j] == variable_status_t::NONBASIC_LOWER && delta_z[j] < -pivot_tol) {
+      const f_t ratio = -z[j] / delta_z[j];
+      if (ratio < step_length) {
+        step_length = ratio;
+      }
+    } else if (vstatus[j] == variable_status_t::NONBASIC_UPPER && delta_z[j] > pivot_tol) {
+      const f_t ratio = -z[j] / delta_z[j];
+      if (ratio < step_length) {
+        step_length = ratio;
+      }
+    }
+  }
+  return step_length;
+}
+
+
+template <typename i_t, typename f_t>
+objective_estimate_t<f_t> single_pivot_objective_estimate(
+  const lp_problem_t<i_t, f_t>& lp,
+  const simplex_solver_settings_t<i_t, f_t>& settings,
+  const csc_matrix_t<i_t, f_t>& A_transpose,
+  const std::vector<variable_status_t>& vstatus,
+  i_t variable_j,
+  i_t basic_j,
+  f_t root_obj,
+  const std::vector<f_t>& x,
+  const std::vector<f_t>& y,
+  const std::vector<f_t>& z,
+  const std::vector<i_t>& basic_list,
+  const std::vector<i_t>& nonbasic_list,
+  const std::vector<i_t>& nonbasic_mark,
+  basis_update_mpf_t<i_t, f_t>& basis_factors,
+  std::vector<i_t>& workspace,
+  std::vector<f_t>& delta_z,
+  f_t& work_estimate)
+{
+  // Compute the objective estimate for the down and up branches of variable j
+
+  // Down branch
+  i_t direction = -1;
+  sparse_vector_t<i_t, f_t> e_k(lp.num_rows, 0);
+  e_k.i.push_back(basic_j);
+  e_k.x.push_back(-f_t(direction));
+
+  sparse_vector_t<i_t, f_t> delta_y(lp.num_rows, 0);
+  basis_factors.b_transpose_solve(e_k, delta_y);
+
+  // Compute delta_z_N = -N^T * delta_y
+  i_t delta_y_nz0      = 0;
+  const i_t nz_delta_y = delta_y.i.size();
+  for (i_t k = 0; k < nz_delta_y; k++) {
+    if (std::abs(delta_y.x[k]) > 1e-12) { delta_y_nz0++; }
+  }
+  work_estimate += nz_delta_y;
+  const f_t delta_y_nz_percentage = delta_y_nz0 / static_cast<f_t>(lp.num_rows) * 100.0;
+  const bool use_transpose = delta_y_nz_percentage <= 30.0;
+  std::vector<i_t> delta_z_indices;
+  // delta_z starts out all zero
+  if (use_transpose) {
+    compute_delta_z(A_transpose,
+                    delta_y,
+                    variable_j,
+                    -1,
+                    nonbasic_mark,
+                    workspace,
+                    delta_z_indices,
+                    delta_z,
+                    work_estimate);
+  } else {
+    std::vector<f_t> delta_y_dense(lp.num_rows, 0);
+    delta_y.to_dense(delta_y_dense);
+    compute_reduced_cost_update(lp,
+                                basic_list,
+                                nonbasic_list,
+                                delta_y_dense,
+                                variable_j,
+                                -1,
+                                workspace,
+                                delta_z_indices,
+                                delta_z,
+                                work_estimate);
+  }
+
+
+
+  // Verify dual feasibility
+#ifdef CHECK_DUAL_FEASIBILITY
+  {
+    std::vector<f_t> dual_residual = z;
+    for (i_t j = 0; j < lp.num_cols; j++) {
+      dual_residual[j] -= lp.objective[j];
+    }
+    matrix_transpose_vector_multiply(lp.A, 1.0, y, 1.0, dual_residual);
+    f_t dual_residual_norm = vector_norm_inf<i_t, f_t>(dual_residual);
+    settings.log.printf("Dual residual norm: %e\n", dual_residual_norm);
+  }
+#endif
+
+  // Compute the step-length
+  f_t step_length = compute_step_length(settings, vstatus, z, delta_z, delta_z_indices);
+
+  // Handle the leaving variable case
+
+  f_t delta_obj = step_length * (x[variable_j] - std::floor(x[variable_j]));
+#ifdef CHECK_DELTA_OBJ
+  f_t delta_obj_check = 0.0;
+  for (i_t k = 0; k < delta_y.i.size(); k++) {
+    delta_obj_check += lp.rhs[delta_y.i[k]] * delta_y.x[k];
+  }
+  for (i_t h = 0; h < delta_z_indices.size(); h++) {
+    const i_t j = delta_z_indices[h];
+    if (vstatus[j] == variable_status_t::NONBASIC_LOWER) {
+      delta_obj_check += lp.lower[j] * delta_z[j];
+    } else if (vstatus[j] == variable_status_t::NONBASIC_UPPER) {
+      delta_obj_check += lp.upper[j] * delta_z[j];
+    }
+  }
+  delta_obj_check += std::floor(x[variable_j]) * delta_z[variable_j];
+  delta_obj_check *= step_length;
+  if (std::abs(delta_obj_check - delta_obj) > 1e-6) {
+    settings.log.printf("Delta obj check %e. Delta obj %e. Step length %e.\n", delta_obj_check, delta_obj, step_length);
+  }
+#endif
+
+  f_t down_obj = root_obj + delta_obj;
+  settings.log.printf("Down branch %d. Step length: %e. Objective estimate: %e. Delta obj: %e. Root obj: %e.\n", variable_j, step_length, down_obj, delta_obj, root_obj);
+
+  // Up branch
+  direction = 1;
+  // Negate delta_z
+  for (i_t j : delta_z_indices)
+  {
+    delta_z[j] *= -1.0;
+  }
+
+  // Compute the step-length
+  step_length = compute_step_length(settings, vstatus, z, delta_z, delta_z_indices);
+
+  delta_obj = step_length * (std::ceil(x[variable_j]) - x[variable_j]);
+  f_t up_obj = root_obj + delta_obj;
+  settings.log.printf("Up   branch %d. Step length: %e. Objective estimate: %e. Delta obj: %e. Root obj: %e.\n", variable_j, step_length, up_obj, delta_obj, root_obj);
+
+  delta_z_indices.push_back(variable_j);
+
+  // Clear delta_z
+  for (i_t j : delta_z_indices)
+  {
+    delta_z[j] = 0.0;
+    workspace[j] = 0;
+  }
+
+#ifdef CHECK_DELTA_Z
+  for (i_t j = 0; j < lp.num_cols; j++) {
+    if (delta_z[j] != 0.0) {
+      settings.log.printf("Delta z %d: %e\n", j, delta_z[j]);
+    }
+  }
+  for (i_t j = 0; j < lp.num_cols; j++) {
+    if (workspace[j] != 0) {
+      settings.log.printf("Workspace %d: %d\n", j, workspace[j]);
+    }
+  }
+#endif
+
+
+  return objective_estimate_t<f_t>{.down_obj = down_obj, .up_obj = up_obj};
+}
+
+
+template <typename i_t, typename f_t>
+void initialize_pseudo_costs_with_estimate(const lp_problem_t<i_t, f_t>& lp,
+                                           const simplex_solver_settings_t<i_t, f_t>& settings,
+                                           const std::vector<variable_status_t>& vstatus,
+                                           const std::vector<f_t>& x,
+                                           const std::vector<f_t>& y,
+                                           const std::vector<f_t>& z,
+                                           const std::vector<i_t>& basic_list,
+                                           const std::vector<i_t>& nonbasic_list,
+                                           const std::vector<i_t>& fractional,
+                                           f_t root_obj,
+                                           basis_update_mpf_t<i_t, f_t>& basis_factors,
+                                           pseudo_costs_t<i_t, f_t>& pc)
+{
+  i_t m = lp.num_rows;
+  i_t n = lp.num_cols;
+
+  csc_matrix_t<i_t, f_t> A_transpose(m, n, 0);
+  lp.A.transpose(A_transpose);
+
+  std::vector<f_t> delta_z(n, 0);
+  std::vector<i_t> workspace(n, 0);
+
+  f_t work_estimate = 0;
+
+  std::vector<i_t> basic_map(n, -1);
+  for (i_t i = 0; i < m; i++) {
+    basic_map[basic_list[i]] = i;
+  }
+
+  std::vector<i_t> nonbasic_mark(n, -1);
+  for (i_t i = 0; i < n - m; i++) {
+    nonbasic_mark[nonbasic_list[i]] = i;
+  }
+
+  for (i_t k = 0; k < fractional.size(); k++) {
+    const i_t j                 = fractional[k];
+    objective_estimate_t<f_t> estimate = single_pivot_objective_estimate(lp,
+                                                                  settings,
+                                                                  A_transpose,
+                                                                  vstatus,
+                                                                  j,
+                                                                  basic_map[j],
+                                                                  root_obj,
+                                                                  x,
+                                                                  y,
+                                                                  z,
+                                                                  basic_list,
+                                                                  nonbasic_list,
+                                                                  nonbasic_mark,
+                                                                  basis_factors,
+                                                                  workspace,
+                                                                  delta_z,
+                                                                  work_estimate);
+    pc.strong_branch_down[k] = estimate.down_obj;
+    pc.strong_branch_up[k] = estimate.up_obj;
+  }
+}
+
+
+
+
 template <typename i_t, typename f_t>
 void strong_branch_helper(i_t start,
                           i_t end,
@@ -329,12 +579,17 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                       const simplex_solver_settings_t<i_t, f_t>& settings,
                       f_t start_time,
                       const std::vector<variable_type_t>& var_types,
-                      const std::vector<f_t> root_soln,
+                      const std::vector<f_t>& root_x,
+                      const std::vector<f_t>& root_y,
+                      const std::vector<f_t>& root_z,
                       const std::vector<i_t>& fractional,
                       f_t root_obj,
                       f_t upper_bound,
                       const std::vector<variable_status_t>& root_vstatus,
                       const std::vector<f_t>& edge_norms,
+                      const std::vector<i_t>& basic_list,
+                      const std::vector<i_t>& nonbasic_list,
+                      basis_update_mpf_t<i_t, f_t>& basis_factors,
                       pseudo_costs_t<i_t, f_t>& pc)
 {
   pc.resize(original_lp.num_cols);
@@ -345,7 +600,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
   const f_t elapsed_time = toc(start_time);
   if (elapsed_time > settings.time_limit) { return; }
 
-  if (settings.mip_batch_pdlp_strong_branching) {
+  if (settings.mip_batch_pdlp_strong_branching == 1) {
     settings.log.printf("Batch PDLP strong branching enabled\n");
 
     f_t start_batch = tic();
@@ -356,7 +611,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
 
     // Convert the root_soln to the original problem space
     std::vector<f_t> original_root_soln_x;
-    uncrush_primal_solution(original_problem, original_lp, root_soln, original_root_soln_x);
+    uncrush_primal_solution(original_problem, original_lp, root_x, original_root_soln_x);
 
     std::vector<f_t> fraction_values;
 
@@ -422,6 +677,20 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
       pc.strong_branch_down[k] = obj_down - root_obj;
       pc.strong_branch_up[k]   = obj_up - root_obj;
     }
+  } else if (settings.mip_batch_pdlp_strong_branching == 2) {
+    initialize_pseudo_costs_with_estimate(original_lp,
+                                          settings,
+                                          root_vstatus,
+                                          root_x,
+                                          root_y,
+                                          root_z,
+                                          basic_list,
+                                          nonbasic_list,
+                                          fractional,
+                                          root_obj,
+                                          basis_factors,
+                                          pc);
+
   } else {
     settings.log.printf("Strong branching using %d threads and %ld fractional variables\n",
                         settings.num_threads,
@@ -458,7 +727,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                              fractional,
                              root_obj,
                              upper_bound,
-                             root_soln,
+                             root_x,
                              root_vstatus,
                              edge_norms,
                              pc);
@@ -467,7 +736,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
     settings.log.printf("Strong branching completed in %.2fs\n", toc(strong_branching_start_time));
   }
 
-  pc.update_pseudo_costs_from_strong_branching(fractional, root_soln);
+  pc.update_pseudo_costs_from_strong_branching(fractional, root_x);
 }
 
 template <typename i_t, typename f_t>
@@ -810,12 +1079,17 @@ template void strong_branching<int, double>(const user_problem_t<int, double>& o
                                             const simplex_solver_settings_t<int, double>& settings,
                                             double start_time,
                                             const std::vector<variable_type_t>& var_types,
-                                            const std::vector<double> root_soln,
+                                            const std::vector<double>& root_x,
+                                            const std::vector<double>& root_y,
+                                            const std::vector<double>& root_z,
                                             const std::vector<int>& fractional,
                                             double root_obj,
                                             double upper_bound,
                                             const std::vector<variable_status_t>& root_vstatus,
                                             const std::vector<double>& edge_norms,
+                                            const std::vector<int>& basic_list,
+                                            const std::vector<int>& nonbasic_list,
+                                            basis_update_mpf_t<int, double>& basis_factors,
                                             pseudo_costs_t<int, double>& pc);
 
 #endif
