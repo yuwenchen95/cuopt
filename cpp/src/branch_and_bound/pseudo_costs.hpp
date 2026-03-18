@@ -407,7 +407,7 @@ struct reliability_branching_settings_t {
   // Estimate the objective change of each fractional variable
   // using a single pivot of dual simplex. Then rank the candidates
   // based on this estimation.
-  bool rank_candidates_with_dual_pivot = true;
+  bool rank_candidates_with_dual_pivot = false;
 };
 
 template <typename i_t, typename f_t>
@@ -529,9 +529,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                       const simplex_solver_settings_t<i_t, f_t>& settings,
                       f_t start_time,
                       const std::vector<variable_type_t>& var_types,
-                      const std::vector<f_t>& root_x,
-                      const std::vector<f_t>& root_y,
-                      const std::vector<f_t>& root_z,
+                      const lp_solution_t<i_t, f_t>& root_solution,
                       const std::vector<i_t>& fractional,
                       f_t root_obj,
                       f_t upper_bound,

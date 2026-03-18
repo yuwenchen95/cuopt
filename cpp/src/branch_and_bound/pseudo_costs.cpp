@@ -23,9 +23,9 @@ namespace cuopt::linear_programming::dual_simplex {
 namespace {
 
 template <typename f_t>
-struct objective_estimate_t {
-  f_t down_obj;
-  f_t up_obj;
+struct objective_change_estimate_t {
+  f_t down_obj_change;
+  f_t up_obj_change;
 };
 
 template <typename i_t, typename f_t>
@@ -52,17 +52,14 @@ f_t compute_step_length(const simplex_solver_settings_t<i_t, f_t>& settings,
 }
 
 template <typename i_t, typename f_t>
-objective_estimate_t<f_t> single_pivot_objective_estimate(
+objective_change_estimate_t<f_t> single_pivot_objective_change_estimate(
   const lp_problem_t<i_t, f_t>& lp,
   const simplex_solver_settings_t<i_t, f_t>& settings,
   const csc_matrix_t<i_t, f_t>& A_transpose,
   const std::vector<variable_status_t>& vstatus,
   i_t variable_j,
   i_t basic_j,
-  f_t leaf_obj,
-  const std::vector<f_t>& x,
-  const std::vector<f_t>& y,
-  const std::vector<f_t>& z,
+  const lp_solution_t<i_t, f_t>& lp_solution,
   const std::vector<i_t>& basic_list,
   const std::vector<i_t>& nonbasic_list,
   const std::vector<i_t>& nonbasic_mark,
@@ -86,7 +83,7 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
   i_t delta_y_nz0      = 0;
   const i_t nz_delta_y = delta_y.i.size();
   for (i_t k = 0; k < nz_delta_y; k++) {
-    if (std::abs(delta_y.x[k]) > 1e-12) { delta_y_nz0++; }
+    if (std::abs(delta_y.x[k]) > settings.zero_tol) { delta_y_nz0++; }
   }
   work_estimate += nz_delta_y;
   const f_t delta_y_nz_percentage = delta_y_nz0 / static_cast<f_t>(lp.num_rows) * 100.0;
@@ -121,7 +118,7 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
   // Verify dual feasibility
 #ifdef CHECK_DUAL_FEASIBILITY
   {
-    std::vector<f_t> dual_residual = z;
+    std::vector<f_t> dual_residual = lp_solution.z;
     for (i_t j = 0; j < lp.num_cols; j++) {
       dual_residual[j] -= lp.objective[j];
     }
@@ -132,15 +129,16 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
 #endif
 
   // Compute the step-length
-  f_t step_length = compute_step_length(settings, vstatus, z, delta_z, delta_z_indices);
+  f_t step_length = compute_step_length(settings, vstatus, lp_solution.z, delta_z, delta_z_indices);
 
   // Handle the leaving variable case
 
-  f_t delta_obj = step_length * (x[variable_j] - std::floor(x[variable_j]));
+  f_t delta_obj_down =
+    step_length * (lp_solution.x[variable_j] - std::floor(lp_solution.x[variable_j]));
 #ifdef CHECK_DELTA_OBJ
   f_t delta_obj_check = 0.0;
   for (i_t k = 0; k < delta_y.i.size(); k++) {
-    delta_obj_check += lp.rhs[delta_y.i[k]] * delta_y.x[k];
+    delta_obj_check += lp.rhs[delta_y.i[k]] * delta_y.lp_solution.x[k];
   }
   for (i_t h = 0; h < delta_z_indices.size(); h++) {
     const i_t j = delta_z_indices[h];
@@ -150,7 +148,7 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
       delta_obj_check += lp.upper[j] * delta_z[j];
     }
   }
-  delta_obj_check += std::floor(x[variable_j]) * delta_z[variable_j];
+  delta_obj_check += std::floor(lp_solution.x[variable_j]) * delta_z[variable_j];
   delta_obj_check *= step_length;
   if (std::abs(delta_obj_check - delta_obj) > 1e-6) {
     settings.log.printf("Delta obj check %e. Delta obj %e. Step length %e.\n",
@@ -160,14 +158,8 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
   }
 #endif
 
-  f_t down_obj = leaf_obj + std::max<f_t>(delta_obj, 0);
   settings.log.debug(
-    "Down branch %d. Step length: %e. Objective estimate: %e. Delta obj: %e. Root obj: %e.\n",
-    variable_j,
-    step_length,
-    down_obj,
-    delta_obj,
-    leaf_obj);
+    "Down branch %d. Step length: %e. Delta obj: %e. \n", variable_j, step_length, delta_obj_down);
 
   // Up branch
   direction = 1;
@@ -177,17 +169,12 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
   }
 
   // Compute the step-length
-  step_length = compute_step_length(settings, vstatus, z, delta_z, delta_z_indices);
+  step_length = compute_step_length(settings, vstatus, lp_solution.z, delta_z, delta_z_indices);
 
-  delta_obj  = step_length * (std::ceil(x[variable_j]) - x[variable_j]);
-  f_t up_obj = leaf_obj + std::max<f_t>(delta_obj, 0);
+  f_t delta_obj_up =
+    step_length * (std::ceil(lp_solution.x[variable_j]) - lp_solution.x[variable_j]);
   settings.log.debug(
-    "Up   branch %d. Step length: %e. Objective estimate: %e. Delta obj: %e. Root obj: %e.\n",
-    variable_j,
-    step_length,
-    up_obj,
-    delta_obj,
-    leaf_obj);
+    "Up branch %d. Step length: %e. Delta obj: %e.\n", variable_j, step_length, delta_obj_up);
 
   delta_z_indices.push_back(variable_j);
 
@@ -206,20 +193,18 @@ objective_estimate_t<f_t> single_pivot_objective_estimate(
   }
 #endif
 
-  return objective_estimate_t<f_t>{.down_obj = down_obj, .up_obj = up_obj};
+  return {.down_obj_change = std::max<f_t>(delta_obj_down, 0),
+          .up_obj_change   = std::max<f_t>(delta_obj_up, 0)};
 }
 
 template <typename i_t, typename f_t>
 void initialize_pseudo_costs_with_estimate(const lp_problem_t<i_t, f_t>& lp,
                                            const simplex_solver_settings_t<i_t, f_t>& settings,
                                            const std::vector<variable_status_t>& vstatus,
-                                           const std::vector<f_t>& x,
-                                           const std::vector<f_t>& y,
-                                           const std::vector<f_t>& z,
+                                           const lp_solution_t<i_t, f_t>& lp_solution,
                                            const std::vector<i_t>& basic_list,
                                            const std::vector<i_t>& nonbasic_list,
                                            const std::vector<i_t>& fractional,
-                                           f_t root_obj,
                                            basis_update_mpf_t<i_t, f_t>& basis_factors,
                                            pseudo_costs_t<i_t, f_t>& pc)
 {
@@ -242,26 +227,24 @@ void initialize_pseudo_costs_with_estimate(const lp_problem_t<i_t, f_t>& lp,
   }
 
   for (i_t k = 0; k < fractional.size(); k++) {
-    const i_t j                        = fractional[k];
-    objective_estimate_t<f_t> estimate = single_pivot_objective_estimate(lp,
-                                                                         settings,
-                                                                         pc.AT,
-                                                                         vstatus,
-                                                                         j,
-                                                                         basic_map[j],
-                                                                         root_obj,
-                                                                         x,
-                                                                         y,
-                                                                         z,
-                                                                         basic_list,
-                                                                         nonbasic_list,
-                                                                         nonbasic_mark,
-                                                                         basis_factors,
-                                                                         workspace,
-                                                                         delta_z,
-                                                                         work_estimate);
-    pc.strong_branch_down[k]           = estimate.down_obj;
-    pc.strong_branch_up[k]             = estimate.up_obj;
+    const i_t j = fractional[k];
+    objective_change_estimate_t<f_t> estimate =
+      single_pivot_objective_change_estimate(lp,
+                                             settings,
+                                             pc.AT,
+                                             vstatus,
+                                             j,
+                                             basic_map[j],
+                                             lp_solution,
+                                             basic_list,
+                                             nonbasic_list,
+                                             nonbasic_mark,
+                                             basis_factors,
+                                             workspace,
+                                             delta_z,
+                                             work_estimate);
+    pc.strong_branch_down[k] = estimate.down_obj_change;
+    pc.strong_branch_up[k]   = estimate.up_obj_change;
   }
 }
 
@@ -572,9 +555,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                       const simplex_solver_settings_t<i_t, f_t>& settings,
                       f_t start_time,
                       const std::vector<variable_type_t>& var_types,
-                      const std::vector<f_t>& root_x,
-                      const std::vector<f_t>& root_y,
-                      const std::vector<f_t>& root_z,
+                      const lp_solution_t<i_t, f_t>& root_solution,
                       const std::vector<i_t>& fractional,
                       f_t root_obj,
                       f_t upper_bound,
@@ -604,7 +585,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
 
     // Convert the root_soln to the original problem space
     std::vector<f_t> original_root_soln_x;
-    uncrush_primal_solution(original_problem, original_lp, root_x, original_root_soln_x);
+    uncrush_primal_solution(original_problem, original_lp, root_solution.x, original_root_soln_x);
 
     std::vector<f_t> fraction_values;
 
@@ -674,13 +655,10 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
     initialize_pseudo_costs_with_estimate(original_lp,
                                           settings,
                                           root_vstatus,
-                                          root_x,
-                                          root_y,
-                                          root_z,
+                                          root_solution,
                                           basic_list,
                                           nonbasic_list,
                                           fractional,
-                                          root_obj,
                                           basis_factors,
                                           pc);
 
@@ -720,7 +698,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
                              fractional,
                              root_obj,
                              upper_bound,
-                             root_x,
+                             root_solution.x,
                              root_vstatus,
                              edge_norms,
                              pc);
@@ -729,7 +707,7 @@ void strong_branching(const user_problem_t<i_t, f_t>& original_problem,
     settings.log.printf("Strong branching completed in %.2fs\n", toc(strong_branching_start_time));
   }
 
-  pc.update_pseudo_costs_from_strong_branching(fractional, root_x);
+  pc.update_pseudo_costs_from_strong_branching(fractional, root_solution.x);
 }
 
 template <typename i_t, typename f_t>
@@ -851,7 +829,6 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
              pseudo_cost_up_avg);
 
   const int64_t branch_and_bound_lp_iters = bnb_stats.total_lp_iters;
-  const int64_t branch_and_bound_explored = bnb_stats.nodes_explored;
   const i_t branch_and_bound_lp_iter_per_node =
     branch_and_bound_lp_iters / bnb_stats.nodes_explored;
 
@@ -873,22 +850,22 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
     reliable_threshold = strong_branching_lp_iter < max_reliability_iter ? reliable_threshold : 0;
   }
 
-  std::vector<i_t> unreliable_list;
+  std::vector<std::pair<f_t, i_t>> unreliable_list;
   omp_mutex_t score_mutex;
 
   for (i_t j : fractional) {
-    if (pseudo_cost_num_down[j] < reliable_threshold ||
-        pseudo_cost_num_up[j] < reliable_threshold) {
-      unreliable_list.push_back(j);
-      continue;
-    }
-
     f_t score =
       calculate_pseudocost_score(j, leaf_solution.x, pseudo_cost_up_avg, pseudo_cost_down_avg);
 
-    if (score > max_score) {
-      max_score  = score;
-      branch_var = j;
+    if (pseudo_cost_num_down[j] < reliable_threshold ||
+        pseudo_cost_num_up[j] < reliable_threshold) {
+      if (pseudo_cost_num_down[j] == 0 || pseudo_cost_num_up[j] == 0) { score = -1; }
+      unreliable_list.push_back(std::make_pair(score, j));
+    } else {
+      if (score > max_score) {
+        max_score  = score;
+        branch_var = j;
+      }
     }
   }
 
@@ -901,7 +878,7 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
     return branch_var;
   }
 
-  const int num_tasks          = std::max(max_num_tasks, 1);
+  const int num_tasks          = std::max(max_num_tasks, 10);
   const int task_priority      = reliability_branching_settings.task_priority;
   const i_t max_num_candidates = reliability_branching_settings.max_num_candidates;
   const i_t num_candidates     = std::min<size_t>(unreliable_list.size(), max_num_candidates);
@@ -920,6 +897,15 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
     reliable_threshold);
 
   if (unreliable_list.size() > max_num_candidates) {
+    std::cout << std::format(
+      "RB iters = {}, B&B iters = {}, unreliable = {}, num_tasks = {}, "
+      "reliable_threshold = {}\n",
+      strong_branching_lp_iter.load(),
+      branch_and_bound_lp_iters,
+      unreliable_list.size(),
+      num_tasks,
+      reliable_threshold);
+
     if (reliability_branching_settings.rank_candidates_with_dual_pivot) {
       i_t m             = worker->leaf_problem.num_rows;
       i_t n             = worker->leaf_problem.num_cols;
@@ -927,8 +913,6 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
 
       std::vector<f_t> delta_z(n, 0);
       std::vector<i_t> workspace(n, 0);
-      std::vector<std::pair<i_t, f_t>> unreliable_list_with_obj;  // {index, objective change}
-      unreliable_list_with_obj.reserve(unreliable_list.size());
 
       std::vector<i_t> basic_map(n, -1);
       for (i_t i = 0; i < m; i++) {
@@ -940,47 +924,39 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
         nonbasic_mark[worker->nonbasic_list[i]] = i;
       }
 
-      for (i_t i = 0; i < unreliable_list.size(); ++i) {
-        i_t j = unreliable_list[i];
+      for (auto& [score, j] : unreliable_list) {
+        if (score == -1) {
+          objective_change_estimate_t<f_t> estimate =
+            single_pivot_objective_change_estimate(worker->leaf_problem,
+                                                   settings,
+                                                   AT,
+                                                   node_ptr->vstatus,
+                                                   j,
+                                                   basic_map[j],
+                                                   leaf_solution,
+                                                   worker->basic_list,
+                                                   worker->nonbasic_list,
+                                                   nonbasic_mark,
+                                                   worker->basis_factors,
+                                                   workspace,
+                                                   delta_z,
+                                                   work_estimate);
 
-        auto [up_obj, down_obj] = single_pivot_objective_estimate(worker->leaf_problem,
-                                                                  settings,
-                                                                  AT,
-                                                                  node_ptr->vstatus,
-                                                                  j,
-                                                                  basic_map[j],
-                                                                  leaf_obj,
-                                                                  leaf_solution.x,
-                                                                  leaf_solution.y,
-                                                                  leaf_solution.z,
-                                                                  worker->basic_list,
-                                                                  worker->nonbasic_list,
-                                                                  nonbasic_mark,
-                                                                  worker->basis_factors,
-                                                                  workspace,
-                                                                  delta_z,
-                                                                  work_estimate);
-
-        unreliable_list_with_obj.push_back({j, std::min(up_obj, down_obj)});
+          score = std::max(estimate.up_obj_change, eps) * std::max(estimate.down_obj_change, eps);
+        }
       }
-
-      // We only need to get the top-k elements in the list, where
-      // k = num_candidates
-      std::partial_sort(unreliable_list_with_obj.begin(),
-                        unreliable_list_with_obj.begin() + num_candidates,
-                        unreliable_list_with_obj.end(),
-                        [](auto el1, auto el2) { return el1.second < el2.second; });
-
-      unreliable_list.clear();
-      for (i_t i = 0; i < num_candidates; ++i) {
-        auto [j, obj] = unreliable_list_with_obj[i];
-        unreliable_list.push_back(j);
-      }
-
     } else {
-      // Shuffle the unreliable list so every variable has the same chance to be selected.
-      worker->rng.shuffle(unreliable_list);
+      for (auto& [score, j] : unreliable_list) {
+        if (score == -1) { score = worker->rng.uniform(eps, max_score); }
+      }
     }
+
+    // We only need to get the top-k elements in the list, where
+    // k = num_candidates
+    std::partial_sort(unreliable_list.begin(),
+                      unreliable_list.begin() + num_candidates,
+                      unreliable_list.end(),
+                      [](auto el1, auto el2) { return el1.first > el2.first; });
   }
 
   if (toc(start_time) > settings.time_limit) {
@@ -991,7 +967,7 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
 #pragma omp taskloop if (num_tasks > 1) priority(task_priority) num_tasks(num_tasks) \
   shared(score_mutex)
   for (i_t i = 0; i < num_candidates; ++i) {
-    const i_t j = unreliable_list[i];
+    auto [score, j] = unreliable_list[i];
 
     if (toc(start_time) > settings.time_limit) { continue; }
 
@@ -1058,7 +1034,7 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
 
     if (toc(start_time) > settings.time_limit) { continue; }
 
-    f_t score =
+    score =
       calculate_pseudocost_score(j, leaf_solution.x, pseudo_cost_up_avg, pseudo_cost_down_avg);
 
     score_mutex.lock();
@@ -1139,9 +1115,7 @@ template void strong_branching<int, double>(const user_problem_t<int, double>& o
                                             const simplex_solver_settings_t<int, double>& settings,
                                             double start_time,
                                             const std::vector<variable_type_t>& var_types,
-                                            const std::vector<double>& root_x,
-                                            const std::vector<double>& root_y,
-                                            const std::vector<double>& root_z,
+                                            const lp_solution_t<int, double>& root_solution,
                                             const std::vector<int>& fractional,
                                             double root_obj,
                                             double upper_bound,
