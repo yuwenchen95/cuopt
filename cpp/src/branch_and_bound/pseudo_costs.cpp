@@ -809,22 +809,13 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
   int max_num_tasks,
   logger_t& log)
 {
-  constexpr f_t eps = 1e-6;
-  f_t start_time    = bnb_stats.start_time;
-  i_t branch_var    = fractional[0];
-  f_t max_score     = -1;
-  i_t num_initialized_down;
-  i_t num_initialized_up;
-  f_t pseudo_cost_down_avg;
-  f_t pseudo_cost_up_avg;
+  constexpr f_t eps                      = 1e-6;
+  f_t start_time                         = bnb_stats.start_time;
+  i_t branch_var                         = fractional[0];
+  f_t max_score                          = -1;
+  f_t pseudo_cost_down_avg               = -1;
+  f_t pseudo_cost_up_avg                 = -1;
   lp_solution_t<i_t, f_t>& leaf_solution = worker->leaf_solution;
-
-  initialized(num_initialized_down, num_initialized_up, pseudo_cost_down_avg, pseudo_cost_up_avg);
-  log.printf("PC: num initialized down %d up %d avg down %e up %e\n",
-             num_initialized_down,
-             num_initialized_up,
-             pseudo_cost_down_avg,
-             pseudo_cost_up_avg);
 
   const int64_t branch_and_bound_lp_iters = bnb_stats.total_lp_iters;
   const i_t branch_and_bound_lp_iter_per_node =
@@ -851,22 +842,36 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
     reliable_threshold = strong_branching_lp_iter < max_reliability_iter ? reliable_threshold : 0;
   }
 
+  // If `reliable_threshold == 0`, then we set the uninitialized pseudocosts to the average.
+  // Otherwise, the best ones are initialized via strong branching, while the other are ignored.  //
+  // In the latter, we are not using the average pseudocost (which calculated in the `initialized`
+  // method).
+  if (reliable_threshold == 0) {
+    i_t num_initialized_up;
+    i_t num_initialized_down;
+    initialized(num_initialized_down, num_initialized_up, pseudo_cost_down_avg, pseudo_cost_up_avg);
+    log.printf("PC: num initialized down %d up %d avg down %e up %e\n",
+               num_initialized_down,
+               num_initialized_up,
+               pseudo_cost_down_avg,
+               pseudo_cost_up_avg);
+  }
+
   std::vector<std::pair<f_t, i_t>> unreliable_list;
   omp_mutex_t score_mutex;
 
   for (i_t j : fractional) {
+    if (pseudo_cost_num_down[j] < reliable_threshold ||
+        pseudo_cost_num_up[j] < reliable_threshold) {
+      unreliable_list.push_back(std::make_pair(-1, j));
+      continue;
+    }
     f_t score =
       calculate_pseudocost_score(j, leaf_solution.x, pseudo_cost_up_avg, pseudo_cost_down_avg);
 
-    if (pseudo_cost_num_down[j] < reliable_threshold ||
-        pseudo_cost_num_up[j] < reliable_threshold) {
-      if (pseudo_cost_num_down[j] == 0 || pseudo_cost_num_up[j] == 0) { score = -1; }
-      unreliable_list.push_back(std::make_pair(score, j));
-    } else {
-      if (score > max_score) {
-        max_score  = score;
-        branch_var = j;
-      }
+    if (score > max_score) {
+      max_score  = score;
+      branch_var = j;
     }
   }
 
@@ -917,7 +922,8 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
       }
 
       for (auto& [score, j] : unreliable_list) {
-        if (score == -1) {
+        if (pseudo_cost_num_down[j] == 0 || pseudo_cost_num_up[j] == 0) {
+          // Estimate the objective change by performing a single pivot of dual simplex.
           objective_change_estimate_t<f_t> estimate =
             single_pivot_objective_change_estimate(worker->leaf_problem,
                                                    settings,
@@ -935,6 +941,10 @@ i_t pseudo_costs_t<i_t, f_t>::reliable_variable_selection(
                                                    work_estimate);
 
           score = std::max(estimate.up_obj_change, eps) * std::max(estimate.down_obj_change, eps);
+        } else {
+          // Use the previous score, even if it is unreliable
+          score = calculate_pseudocost_score(
+            j, leaf_solution.x, pseudo_cost_up_avg, pseudo_cost_down_avg);
         }
       }
     } else {
