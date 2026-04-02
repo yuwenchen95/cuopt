@@ -2784,6 +2784,7 @@ dual::status_t dual_phase2_with_advanced_basis(i_t phase,
 
   while (iter < iter_limit) {
     PHASE2_NVTX_RANGE("DualSimplex::phase2_main_loop");
+
     // Pricing
     i_t direction           = 0;
     i_t basic_leaving_index = -1;
@@ -2889,6 +2890,12 @@ dual::status_t dual_phase2_with_advanced_basis(i_t phase,
                                  sol);
       status = dual::status_t::OPTIMAL;
       break;
+    }
+
+    if (toc(start_time) > settings.time_limit) { return dual::status_t::TIME_LIMIT; }
+
+    if (settings.concurrent_halt != nullptr && *settings.concurrent_halt == 1) {
+      return dual::status_t::CONCURRENT_LIMIT;
     }
 
     // BTran
