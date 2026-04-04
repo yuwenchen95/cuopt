@@ -93,7 +93,6 @@ int run_single_file(const std::string& file_path,
                     bool solve_relaxation,
                     cuopt::linear_programming::solver_settings_t<int, double>& settings)
 {
-
   cuopt::init_logger_t log(settings.get_parameter<std::string>(CUOPT_LOG_FILE),
                            settings.get_parameter<bool>(CUOPT_LOG_TO_CONSOLE));
 
@@ -102,7 +101,7 @@ int run_single_file(const std::string& file_path,
   constexpr bool input_mps_strict = false;
   cuopt::mps_parser::mps_data_model_t<int, double> mps_data_model;
   bool parsing_failed = false;
-  auto timer = cuopt::timer_t(settings.get_parameter<double>(CUOPT_TIME_LIMIT));
+  auto timer          = cuopt::timer_t(settings.get_parameter<double>(CUOPT_TIME_LIMIT));
   {
     CUOPT_LOG_INFO("Reading file %s", base_filename.c_str());
     try {

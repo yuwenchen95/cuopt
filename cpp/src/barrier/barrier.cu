@@ -3410,7 +3410,6 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
     if (lp.Q.n > 0) {
       settings.log.printf("Quadratic objective matrix: %d nonzeros\n", lp.Q.row_start[lp.Q.n]);
     }
-    settings.log.printf("Objective constant %e\n", lp.obj_constant);
     settings.log.printf("\n");
 
     // Compute the number of free variables
@@ -3492,7 +3491,9 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
     f_t relative_primal_residual = primal_residual_norm / (1.0 + norm_b);
     f_t relative_dual_residual   = dual_residual_norm / (1.0 + norm_c);
     f_t relative_complementarity_residual =
-      complementarity_residual_norm / (1.0 + std::min(std::abs(compute_user_objective(lp, primal_objective)), std::abs(primal_objective)));
+      complementarity_residual_norm /
+      (1.0 + std::min(std::abs(compute_user_objective(lp, primal_objective)),
+                      std::abs(primal_objective)));
 
     dense_vector_t<i_t, f_t> upper(lp.upper);
     data.gather_upper_bounds(upper, data.restrict_u_);
@@ -3655,7 +3656,8 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
       relative_dual_residual   = dual_residual_norm / (1.0 + norm_c);
       relative_complementarity_residual =
         complementarity_residual_norm /
-        (1.0 + std::min(std::abs(compute_user_objective(lp, primal_objective)), std::abs(primal_objective)));
+        (1.0 + std::min(std::abs(compute_user_objective(lp, primal_objective)),
+                        std::abs(primal_objective)));
 
       if (relative_primal_residual < settings.barrier_relaxed_feasibility_tol &&
           relative_dual_residual < settings.barrier_relaxed_optimality_tol &&
