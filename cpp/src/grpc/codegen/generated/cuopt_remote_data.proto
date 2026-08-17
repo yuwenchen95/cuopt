@@ -186,7 +186,7 @@ message PDLPSolverSettings {
   optional int32 augmented = 23;
   optional int32 dualize = 24;
   optional int32 ordering = 25;
-  optional int32 barrier_dual_initial_point = 26;
+  optional int32 barrier_initial_point = 26;
   optional bool eliminate_dense_columns = 27;
   bool save_best_primal_so_far = 28;
   bool first_primal_feasible = 29;

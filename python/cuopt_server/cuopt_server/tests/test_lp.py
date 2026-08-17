@@ -142,7 +142,7 @@ def test_sample_milp(
 )
 @pytest.mark.parametrize(
     "folding, dualize, ordering, augmented, eliminate_dense, cudss_determ, "
-    "dual_initial_point",
+    "initial_point",
     [
         # Test automatic settings (default)
         (-1, -1, -1, -1, True, False, -1),
@@ -168,7 +168,7 @@ def test_barrier_solver_options(
     augmented,
     eliminate_dense,
     cudss_determ,
-    dual_initial_point,
+    initial_point,
 ):
     """
     Test the barrier solver (method=3) with various configuration options:
@@ -179,7 +179,7 @@ def test_barrier_solver_options(
     - eliminate_dense_columns: True to eliminate, False to not
     - cudss_deterministic: True for deterministic, False for
       nondeterministic
-    - barrier_dual_initial_point: (-1) automatic, (0) Lustig-Marsten-Shanno,
+    - barrier_initial_point: (-1) automatic, (0) Lustig-Marsten-Shanno,
       (1) dual least squares, (2) Sturm/SeDuMi mu-based primal+dual
     """
     data = get_std_data_for_lp()
@@ -194,7 +194,7 @@ def test_barrier_solver_options(
     data["solver_config"]["augmented"] = augmented
     data["solver_config"]["eliminate_dense_columns"] = eliminate_dense
     data["solver_config"]["cudss_deterministic"] = cudss_determ
-    data["solver_config"]["barrier_dual_initial_point"] = dual_initial_point
+    data["solver_config"]["barrier_initial_point"] = initial_point
 
     res = get_lp(client, data)
 
@@ -204,7 +204,7 @@ def test_barrier_solver_options(
     print(f"folding={folding}, dualize={dualize}, ordering={ordering}")
     print(f"augmented={augmented}, eliminate_dense={eliminate_dense}")
     print(f"cudss_deterministic={cudss_determ}")
-    print(f"barrier_dual_initial_point={dual_initial_point}")
+    print(f"barrier_initial_point={initial_point}")
     print(res.json())
 
     validate_lp_result(

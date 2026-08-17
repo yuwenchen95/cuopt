@@ -67,8 +67,8 @@
   if (pb_settings.has_ordering()) {
     settings.ordering = pb_settings.ordering();
   }
-  if (pb_settings.has_barrier_dual_initial_point()) {
-    settings.barrier_dual_initial_point = static_cast<barrier_dual_initial_point_t>(pb_settings.barrier_dual_initial_point());
+  if (pb_settings.has_barrier_initial_point()) {
+    settings.barrier_initial_point = static_cast<barrier_initial_point_t>(pb_settings.barrier_initial_point());
   }
   if (pb_settings.has_eliminate_dense_columns()) {
     settings.eliminate_dense_columns = pb_settings.eliminate_dense_columns();

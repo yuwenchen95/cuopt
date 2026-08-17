@@ -2241,8 +2241,8 @@ TEST(MapperRoundtrip, PDLPSettingsAllFields)
   orig.augmented               = 1;
   orig.dualize                 = 1;
   orig.ordering                = 2;
-  orig.barrier_dual_initial_point =
-    cuopt::mathematical_optimization::barrier_dual_initial_point_t::LustigMarstenShanno;
+  orig.barrier_initial_point =
+    cuopt::mathematical_optimization::barrier_initial_point_t::LustigMarstenShanno;
   orig.eliminate_dense_columns      = true;
   orig.barrier_iterative_refinement = false;  // not the default true, to detect overwrite-on-decode
   orig.barrier_step_scale           = 0.75;   // not the default 0.9
@@ -2283,8 +2283,8 @@ TEST(MapperRoundtrip, PDLPSettingsAllFields)
   EXPECT_EQ(restored.augmented, 1);
   EXPECT_EQ(restored.dualize, 1);
   EXPECT_EQ(restored.ordering, 2);
-  EXPECT_EQ(restored.barrier_dual_initial_point,
-            cuopt::mathematical_optimization::barrier_dual_initial_point_t::LustigMarstenShanno);
+  EXPECT_EQ(restored.barrier_initial_point,
+            cuopt::mathematical_optimization::barrier_initial_point_t::LustigMarstenShanno);
   EXPECT_EQ(restored.eliminate_dense_columns, true);
   EXPECT_EQ(restored.barrier_iterative_refinement, false);
   EXPECT_DOUBLE_EQ(restored.barrier_step_scale, 0.75);
@@ -2436,7 +2436,7 @@ TEST(MapperRoundtrip, PDLPSettingsDefaultProtoPreservesAllCppDefaults)
   EXPECT_EQ(after.augmented, fresh.augmented);
   EXPECT_EQ(after.dualize, fresh.dualize);
   EXPECT_EQ(after.ordering, fresh.ordering);
-  EXPECT_EQ(after.barrier_dual_initial_point, fresh.barrier_dual_initial_point);
+  EXPECT_EQ(after.barrier_initial_point, fresh.barrier_initial_point);
   EXPECT_DOUBLE_EQ(after.barrier_step_scale, fresh.barrier_step_scale);
   // Enum-int32 fields (post-decode clamping defends out-of-range; default `0`
   // on the wire is in-range so the clamp does not fire, but the `optional`

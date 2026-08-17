@@ -150,11 +150,11 @@ enum presolver_t : int {
  * DualLeastSquares: solve augmented or ADAT dual least-squares system.
  * SedumiMu: Sturm/SeDuMi mu-based primal+dual point (no factorization).
  */
-enum barrier_dual_initial_point_t : int {
-  Automatic           = CUOPT_BARRIER_DUAL_INITIAL_POINT_AUTOMATIC,
-  LustigMarstenShanno = CUOPT_BARRIER_DUAL_INITIAL_POINT_LUSTIG_MARSTEN_SHANNO,
-  DualLeastSquares    = CUOPT_BARRIER_DUAL_INITIAL_POINT_DUAL_LEAST_SQUARES,
-  SedumiMu            = CUOPT_BARRIER_DUAL_INITIAL_POINT_SEDUMI_MU
+enum barrier_initial_point_t : int {
+  Automatic           = CUOPT_BARRIER_INITIAL_POINT_AUTOMATIC,
+  LustigMarstenShanno = CUOPT_BARRIER_INITIAL_POINT_LUSTIG_MARSTEN_SHANNO,
+  DualLeastSquares    = CUOPT_BARRIER_INITIAL_POINT_DUAL_LEAST_SQUARES,
+  SedumiMu            = CUOPT_BARRIER_INITIAL_POINT_SEDUMI_MU
 };
 
 }  // namespace mathematical_optimization

@@ -2204,11 +2204,11 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
   const bool use_augmented          = data.use_augmented;
   const bool has_direct_free_linear = data.n_direct_free_linear > 0;
 
-  const barrier_dual_initial_point_t input_strategy = settings.barrier_dual_initial_point;
+  const barrier_initial_point_t input_strategy = settings.barrier_initial_point;
 
-  const barrier_dual_initial_point_t init_strategy =
-    (data.has_cones() && input_strategy == barrier_dual_initial_point_t::Automatic)
-      ? barrier_dual_initial_point_t::SedumiMu
+  const barrier_initial_point_t init_strategy =
+    (data.has_cones() && input_strategy == barrier_initial_point_t::Automatic)
+      ? barrier_initial_point_t::SedumiMu
       : input_strategy;
 
   // SedumiMu: Sturm/SeDuMi-style mu-based primal+dual initial point.
@@ -2216,7 +2216,7 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
   // where e_K is the identity of the symmetric cone:
   //   LP block: e = 1,  SOC block: e = (sqrt(2), 0, ..., 0)
   // Full primal+dual point; no factorization/solve (main loop factorizes later).
-  if (init_strategy == barrier_dual_initial_point_t::SedumiMu) {
+  if (init_strategy == barrier_initial_point_t::SedumiMu) {
     const f_t norm_b     = vector_norm_inf<i_t, f_t>(lp.rhs);
     const f_t norm_c     = vector_norm_inf<i_t, f_t>(lp.objective);
     const f_t mu         = std::sqrt((1.0 + norm_b) * (1.0 + norm_c));
@@ -2404,8 +2404,8 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
       values, epsilon_adjust, linear_mask, linear_end, lp.second_order_cone_dims);
   };
 
-  if (init_strategy == barrier_dual_initial_point_t::Automatic ||
-      init_strategy == barrier_dual_initial_point_t::LustigMarstenShanno) {
+  if (init_strategy == barrier_initial_point_t::Automatic ||
+      init_strategy == barrier_initial_point_t::LustigMarstenShanno) {
     // Use the dual starting point suggested by the paper
     // On Implementing Mehrotra’s Predictor–Corrector Interior-Point Method for Linear Programming
     // Irvin J. Lustig, Roy E. Marsten, and David F. Shanno

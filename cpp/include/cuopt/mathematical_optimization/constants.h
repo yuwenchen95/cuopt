@@ -46,7 +46,7 @@
 #define CUOPT_AUGMENTED                             "augmented"
 #define CUOPT_DUALIZE                               "dualize"
 #define CUOPT_ORDERING                              "ordering"
-#define CUOPT_BARRIER_DUAL_INITIAL_POINT            "barrier_dual_initial_point"
+#define CUOPT_BARRIER_INITIAL_POINT                 "barrier_initial_point"
 #define CUOPT_POSTSOLVE_INFO                        "postsolve_info"
 #define CUOPT_BARRIER_PRESOLVE_BOUND_FREE_VARIABLES "barrier_presolve_bound_free_variables"
 #define CUOPT_BARRIER_ITERATIVE_REFINEMENT          "barrier_iterative_refinement"
@@ -205,10 +205,10 @@
 #define CUOPT_METHOD_BARRIER      3
 #define CUOPT_METHOD_UNSET        4
 
-#define CUOPT_BARRIER_DUAL_INITIAL_POINT_AUTOMATIC             -1
-#define CUOPT_BARRIER_DUAL_INITIAL_POINT_LUSTIG_MARSTEN_SHANNO 0
-#define CUOPT_BARRIER_DUAL_INITIAL_POINT_DUAL_LEAST_SQUARES    1
-#define CUOPT_BARRIER_DUAL_INITIAL_POINT_SEDUMI_MU             2
+#define CUOPT_BARRIER_INITIAL_POINT_AUTOMATIC             -1
+#define CUOPT_BARRIER_INITIAL_POINT_LUSTIG_MARSTEN_SHANNO 0
+#define CUOPT_BARRIER_INITIAL_POINT_DUAL_LEAST_SQUARES    1
+#define CUOPT_BARRIER_INITIAL_POINT_SEDUMI_MU             2
 
 /* @brief PDLP precision mode constants */
 #define CUOPT_PDLP_DEFAULT_PRECISION -1

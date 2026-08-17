@@ -496,9 +496,9 @@ class SolverConfig(BaseModel):
         description="Set the type of ordering to use for the barrier solver."
         "-1 for automatic, 0 to use cuDSS default ordering, 1 to use AMD",
     )
-    barrier_dual_initial_point: Optional[int] = Field(
+    barrier_initial_point: Optional[int] = Field(
         default=-1,
-        description="Set the type of dual initial point to use for the barrier"
+        description="Set the type of initial point to use for the barrier"
         "solver. -1 for automatic, 0 to use Lustig, Marsten, and Shanno"
         "initial point, 1 to use initial point from a dual least squares"
         "problem, 2 to use Sturm/SeDuMi mu-based primal+dual"
