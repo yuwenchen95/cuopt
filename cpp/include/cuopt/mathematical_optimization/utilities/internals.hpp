@@ -156,5 +156,20 @@ enum barrier_iterative_refinement_t : int {
   FixedPoint = CUOPT_BARRIER_IR_FIXED_POINT
 };
 
+/**
+ * @brief Barrier primal-dual initial-point strategy.
+ *
+ * Automatic: use Lustig-Marsten-Shanno for LP/QP; Sturm/SeDuMi mu-based point for conic problems.
+ * LustigMarstenShanno: Mehrotra-style dual start (Lustig, Marsten, Shanno, SIAM J. Optim. 1992).
+ * DualLeastSquares: solve augmented or ADAT dual least-squares system.
+ * SedumiMu: Sturm/SeDuMi mu-based primal+dual point (no factorization).
+ */
+enum barrier_initial_point_t : int {
+  Automatic           = CUOPT_BARRIER_INITIAL_POINT_AUTOMATIC,
+  LustigMarstenShanno = CUOPT_BARRIER_INITIAL_POINT_LUSTIG_MARSTEN_SHANNO,
+  DualLeastSquares    = CUOPT_BARRIER_INITIAL_POINT_DUAL_LEAST_SQUARES,
+  SedumiMu            = CUOPT_BARRIER_INITIAL_POINT_SEDUMI_MU
+};
+
 }  // namespace mathematical_optimization
 }  // namespace cuopt

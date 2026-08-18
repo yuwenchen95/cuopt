@@ -294,10 +294,10 @@ cuDSS Nested-Dissection Levels
 
 .. note:: The default value is ``-1`` (unset).
 
-Dual Initial Point
-""""""""""""""""""
+Initial Point
+"""""""""""""
 
-``CUOPT_BARRIER_DUAL_INITIAL_POINT`` controls the method used to compute the dual initial point for the barrier solver. The choice of initial point will affect the number of iterations performed by barrier.
+``CUOPT_BARRIER_INITIAL_POINT`` controls the method used to compute the initial point for the barrier solver. The choice of initial point will affect the number of iterations performed by barrier.
 
 * ``-1``: Automatic (default) - cuOpt selects the best method
 * ``0``: Use an initial point from a heuristic approach based on the paper "On Implementing Mehrotra's Predictor–Corrector Interior-Point Method for Linear Programming" (SIAM J. Optimization, 1992) by Lustig, Martsten, Shanno.

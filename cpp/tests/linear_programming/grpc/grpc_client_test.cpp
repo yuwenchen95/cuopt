@@ -2224,25 +2224,26 @@ TEST(MapperRoundtrip, PDLPSettingsAllFields)
   orig.tolerances.absolute_primal_tolerance   = 5e-7;
   orig.tolerances.relative_primal_tolerance   = 6e-7;
 
-  orig.time_limit                   = 99.5;
-  orig.iteration_limit              = 10000;
-  orig.log_to_console               = false;
-  orig.detect_infeasibility         = true;
-  orig.strict_infeasibility         = true;
-  orig.pdlp_solver_mode             = pdlp_solver_mode_t::Fast1;
-  orig.method                       = method_t::Barrier;
-  orig.presolver                    = presolver_t::Default;
-  orig.dual_postsolve               = true;
-  orig.crossover                    = true;
-  orig.num_gpus                     = 4;
-  orig.per_constraint_residual      = true;
-  orig.cudss_deterministic          = true;
-  orig.cudss_nd_nlevels             = 8;
-  orig.folding                      = 1;
-  orig.augmented                    = 1;
-  orig.dualize                      = 1;
-  orig.ordering                     = 2;
-  orig.barrier_dual_initial_point   = 1;
+  orig.time_limit              = 99.5;
+  orig.iteration_limit         = 10000;
+  orig.log_to_console          = false;
+  orig.detect_infeasibility    = true;
+  orig.strict_infeasibility    = true;
+  orig.pdlp_solver_mode        = pdlp_solver_mode_t::Fast1;
+  orig.method                  = method_t::Barrier;
+  orig.presolver               = presolver_t::Default;
+  orig.dual_postsolve          = true;
+  orig.crossover               = true;
+  orig.num_gpus                = 4;
+  orig.per_constraint_residual = true;
+  orig.cudss_deterministic     = true;
+  orig.cudss_nd_nlevels        = 8;
+  orig.folding                 = 1;
+  orig.augmented               = 1;
+  orig.dualize                 = 1;
+  orig.ordering                = 2;
+  orig.barrier_initial_point =
+    cuopt::mathematical_optimization::barrier_initial_point_t::LustigMarstenShanno;
   orig.eliminate_dense_columns      = true;
   orig.barrier_iterative_refinement = 0;     // not the default 1 (gmres)
   orig.barrier_step_scale           = 0.75;  // not the default 0.9
@@ -2284,7 +2285,8 @@ TEST(MapperRoundtrip, PDLPSettingsAllFields)
   EXPECT_EQ(restored.augmented, 1);
   EXPECT_EQ(restored.dualize, 1);
   EXPECT_EQ(restored.ordering, 2);
-  EXPECT_EQ(restored.barrier_dual_initial_point, 1);
+  EXPECT_EQ(restored.barrier_initial_point,
+            cuopt::mathematical_optimization::barrier_initial_point_t::LustigMarstenShanno);
   EXPECT_EQ(restored.eliminate_dense_columns, true);
   EXPECT_EQ(restored.barrier_iterative_refinement, 0);
   EXPECT_DOUBLE_EQ(restored.barrier_step_scale, 0.75);
@@ -2415,7 +2417,7 @@ TEST(MapperRoundtrip, PDLPSettingsDefaultProtoPreservesAllCppDefaults)
   EXPECT_EQ(after.ordering, fresh.ordering);
   EXPECT_EQ(after.cudss_nd_nlevels, fresh.cudss_nd_nlevels);
   EXPECT_EQ(after.barrier_iterative_refinement, fresh.barrier_iterative_refinement);
-  EXPECT_EQ(after.barrier_dual_initial_point, fresh.barrier_dual_initial_point);
+  EXPECT_EQ(after.barrier_initial_point, fresh.barrier_initial_point);
   EXPECT_DOUBLE_EQ(after.barrier_step_scale, fresh.barrier_step_scale);
   // Enum-int32 fields (post-decode clamping defends out-of-range; default `0`
   // on the wire is in-range so the clamp does not fire, but the `optional`
