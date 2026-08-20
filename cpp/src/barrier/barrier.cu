@@ -1022,15 +1022,19 @@ class iteration_data_t {
   {
     raft::common::nvtx::range fun_scope("Barrier: refresh LP numerics");
 
-    c = lp.objective;
-    b = lp.rhs;
+    {
+      raft::common::nvtx::range scope("Barrier: refresh LP numerics: copy c, b, AD, AT");
+      c = lp.objective;
+      b = lp.rhs;
 
-    AD = A;
-    if (!use_augmented && n_dense_columns > 0) { AD.remove_columns(cols_to_remove); }
-    AT.transpose(AD);
+      AD = A;
+      if (!use_augmented && n_dense_columns > 0) { AD.remove_columns(cols_to_remove); }
+      AT.transpose(AD);
+    }
 
     const bool has_Q = Q.n > 0;
     if (has_Q) {
+      raft::common::nvtx::range scope("Barrier: refresh LP numerics: Qdiag");
       for (i_t j = 0; j < Q.n; j++) {
         Qdiag[j] = 0.0;
         const i_t col_start = Q.col_start[j];
@@ -1048,37 +1052,45 @@ class iteration_data_t {
       }
     }
 
-    diag.set_scalar(1.0);
-    if (n_upper_bounds > 0) {
-      for (i_t k = 0; k < n_upper_bounds; k++) {
-        const i_t j = upper_bounds[k];
-        diag[j]     = 2.0;
+    {
+      raft::common::nvtx::range scope("Barrier: refresh LP numerics: diag and inv_diag");
+      diag.set_scalar(1.0);
+      if (n_upper_bounds > 0) {
+        for (i_t k = 0; k < n_upper_bounds; k++) {
+          const i_t j = upper_bounds[k];
+          diag[j]     = 2.0;
+        }
       }
-    }
-    if (has_Q && !use_augmented) {
-      for (i_t j = 0; j < Q.n; j++) {
-        diag[j] += Qdiag[j];
+      if (has_Q && !use_augmented) {
+        for (i_t j = 0; j < Q.n; j++) {
+          diag[j] += Qdiag[j];
+        }
       }
-    }
 
-    inv_diag.set_scalar(1.0);
-    if (use_augmented) { diag.multiply_scalar(-1.0); }
-    if (n_upper_bounds > 0 || (has_Q && !use_augmented)) { diag.inverse(inv_diag); }
-    raft::copy(d_inv_diag.data(), inv_diag.data(), inv_diag.size(), stream_view_);
-    inv_sqrt_diag.set_scalar(1.0);
-    if (n_upper_bounds > 0 || (has_Q && !use_augmented)) { inv_diag.sqrt(inv_sqrt_diag); }
+      inv_diag.set_scalar(1.0);
+      if (use_augmented) { diag.multiply_scalar(-1.0); }
+      if (n_upper_bounds > 0 || (has_Q && !use_augmented)) { diag.inverse(inv_diag); }
+      raft::copy(d_inv_diag.data(), inv_diag.data(), inv_diag.size(), stream_view_);
+      inv_sqrt_diag.set_scalar(1.0);
+      if (n_upper_bounds > 0 || (has_Q && !use_augmented)) { inv_diag.sqrt(inv_sqrt_diag); }
+    }
 
     if (!use_augmented) {
-      ad_mat().copy(AD, handle_ptr->get_stream());
-      raft::copy(original_a_values().data(),
-                 ad_mat().x.data(),
-                 ad_mat().x.size(),
-                 handle_ptr->get_stream());
-      raft::copy(a_x_values().data(), ad_mat().x.data(), ad_mat().x.size(), handle_ptr->get_stream());
-      ad_mat().to_compressed_row(a_mat(), handle_ptr->get_stream());
-      RAFT_CHECK_CUDA(handle_ptr->get_stream());
+      {
+        raft::common::nvtx::range scope("Barrier: refresh LP numerics: ad_mat/a_mat rebuild");
+        ad_mat().copy(AD, handle_ptr->get_stream());
+        raft::copy(original_a_values().data(),
+                   ad_mat().x.data(),
+                   ad_mat().x.size(),
+                   handle_ptr->get_stream());
+        raft::copy(
+          a_x_values().data(), ad_mat().x.data(), ad_mat().x.size(), handle_ptr->get_stream());
+        ad_mat().to_compressed_row(a_mat(), handle_ptr->get_stream());
+        RAFT_CHECK_CUDA(handle_ptr->get_stream());
+      }
 
       if (adopted_symbolic_) {
+        raft::common::nvtx::range scope("Barrier: refresh LP numerics: refresh/rebuild ADAT");
         if (!refresh_adat_values()) {
           if (!rebuild_adat_symbolic()) { return false; }
         } else {
@@ -1089,13 +1101,17 @@ class iteration_data_t {
     }
 
     if (use_augmented) {
+      raft::common::nvtx::range scope("Barrier: refresh LP numerics: refresh/rebuild augmented");
       if (!refresh_augmented_values()) {
         if (!rebuild_augmented_symbolic()) { return false; }
       }
     }
 
-    cusparse_view_.update_matrix_values(A);
-    if (Q.n > 0) { cusparse_Q_view_.update_matrix_values(Q); }
+    {
+      raft::common::nvtx::range scope("Barrier: refresh LP numerics: cusparse view update");
+      cusparse_view_.update_matrix_values(A);
+      if (Q.n > 0) { cusparse_Q_view_.update_matrix_values(Q); }
+    }
 
     reset_for_new_solve();
     return true;
@@ -4744,11 +4760,20 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
       return status;
     };
 
-    if (lp.Q.n > 0) { create_Q(lp, Q); }
+    if (lp.Q.n > 0) {
+      raft::common::nvtx::range scope_create_q("Barrier: solve: create_Q");
+      create_Q(lp, Q);
+    }
     barrier_symbolic_cache_t<i_t, f_t>* adopt_cache = nullptr;
-    if (session != nullptr) { adopt_cache = session->symbolic_cache_for_reuse(lp.handle_ptr); }
-    owned_data = std::make_unique<iteration_data_t<i_t, f_t>>(
-      lp, num_upper_bounds, presolve_info.direct_free_variables, Q, settings, adopt_cache);
+    if (session != nullptr) {
+      raft::common::nvtx::range scope_cache_lookup("Barrier: solve: symbolic_cache_for_reuse");
+      adopt_cache = session->symbolic_cache_for_reuse(lp.handle_ptr);
+    }
+    {
+      raft::common::nvtx::range scope_ctor("Barrier: solve: iteration_data_t construction");
+      owned_data = std::make_unique<iteration_data_t<i_t, f_t>>(
+        lp, num_upper_bounds, presolve_info.direct_free_variables, Q, settings, adopt_cache);
+    }
     iteration_data_t<i_t, f_t>& data = *owned_data;
 
     if (data.adopted_symbolic()) {

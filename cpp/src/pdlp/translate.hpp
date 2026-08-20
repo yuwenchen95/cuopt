@@ -329,11 +329,15 @@ static simplex::user_problem_t<i_t, f_t> cuopt_optimization_problem_to_user_prob
   }
 
   if (model.has_quadratic_constraints()) {
+    raft::common::nvtx::range scope("QCQP: convert_quadratic_constraints_to_second_order_cones");
     barrier::convert_quadratic_constraints_to_second_order_cones<i_t, f_t>(
       static_cast<int>(n), model.get_quadratic_constraints(), csr_A, user_problem);
   }
 
-  csr_A.to_compressed_col(user_problem.A);
+  {
+    raft::common::nvtx::range scope("QCQP: csr_A.to_compressed_col");
+    csr_A.to_compressed_col(user_problem.A);
+  }
 
   return user_problem;
 }
