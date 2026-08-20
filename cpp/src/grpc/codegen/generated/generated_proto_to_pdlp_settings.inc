@@ -85,6 +85,12 @@
   if (pb_settings.has_barrier_iterative_refinement()) {
     settings.barrier_iterative_refinement = pb_settings.barrier_iterative_refinement();
   }
+  if (pb_settings.has_barrier_adaptive_regularization()) {
+    settings.barrier_adaptive_regularization = pb_settings.barrier_adaptive_regularization();
+  }
+  if (pb_settings.has_barrier_complementarity_tol()) {
+    settings.barrier_complementarity_tol = pb_settings.barrier_complementarity_tol();
+  }
   settings.save_best_primal_so_far = pb_settings.save_best_primal_so_far();
   settings.first_primal_feasible = pb_settings.first_primal_feasible();
   if (pb_settings.has_pdlp_precision()) {

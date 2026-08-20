@@ -104,6 +104,7 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_MIP_CUT_CHANGE_THRESHOLD, &mip_settings.cut_change_threshold, f_t(-1.0), std::numeric_limits<f_t>::infinity(), f_t(-1.0)},
     {CUOPT_MIP_CUT_MIN_ORTHOGONALITY, &mip_settings.cut_min_orthogonality, f_t(0.0), f_t(1.0), f_t(0.5)},
     {CUOPT_BARRIER_STEP_SCALE, &pdlp_settings.barrier_step_scale, f_t(0.5), f_t(0.9999), f_t(0.9)},
+    {CUOPT_BARRIER_COMPLEMENTARITY_TOL, &pdlp_settings.barrier_complementarity_tol, f_t(0.0), f_t(1e-1), f_t(1e-8)},
     {CUOPT_BARRIER_INITIAL_POINT_SAFEGUARD, &pdlp_settings.barrier_initial_point_safeguard, f_t(0.0), std::numeric_limits<f_t>::infinity(), f_t(10.0), "margin pushing the barrier initial iterate into the interior of the nonnegative orthant / SOC"},
     // MIP heuristic hyper-parameters (hidden from default --help: name contains "hyper_")
     {CUOPT_MIP_HYPER_HEURISTIC_ROOT_LP_TIME_RATIO, &mip_settings.heuristic_params.root_lp_time_ratio, f_t(0.0), f_t(1.0), f_t(0.1), "fraction of total time for root LP"},
@@ -189,7 +190,8 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     // Recursive sub-MIP (RINS) hyper-parameters (hidden from default --help: name contains "hyper_")
     {CUOPT_MIP_HYPER_SUBMIP_NODE_LIMIT_BASE, &mip_settings.submip_params.node_limit_base, 0, std::numeric_limits<i_t>::max(), 200, "base node limit for the sub-MIP"},
     {CUOPT_MIP_HYPER_SUBMIP_MAX_LEVEL, &mip_settings.submip_params.max_level, 0, std::numeric_limits<i_t>::max(), 10, "maximum sub-MIP recursion level"},
-    {CUOPT_BARRIER_PRESOLVE_BOUND_FREE_VARIABLES, &pdlp_settings.barrier_presolve_bound_free_variables, -1, 1, -1, "Bound free variables during barrier presolve: -1 automatic (current default behavior), 0 disabled, 1 enabled"},
+    {CUOPT_BARRIER_PRESOLVE_BOUND_FREE_VARIABLES, &pdlp_settings.barrier_presolve_bound_free_variables, -1, 1, -1, "Bound free variables during barrier presolve: -1 automatic (default behavior), 0 disabled, 1 enabled"},
+    {CUOPT_BARRIER_ADAPTIVE_REGULARIZATION, &pdlp_settings.barrier_adaptive_regularization, -1, 1, -1, "Adaptive regularization for barrier method: -1 automatic (default behavior), 0 disabled, 1 enabled"},
     // QCQP (barrier) scaling hyper-parameter
     {CUOPT_QCQP_HYPER_RUIZ_EQUILIBRATION, &pdlp_settings.qcqp_ruiz_equilibration, -1, 1, -1, "Ruiz equilibration for QCQP barrier scaling: -1 automatic (row/column imbalance heuristic), 0 disabled, 1 enabled"},
     // cuDSS (barrier) reordering hyper-parameter

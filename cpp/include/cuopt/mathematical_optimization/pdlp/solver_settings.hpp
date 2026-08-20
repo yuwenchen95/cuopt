@@ -317,8 +317,12 @@ class pdlp_solver_settings_t {
   // true to use a single cuSPARSE SpMV over the unperturbed augmented CSR for the barrier
   // solver's IR matvec, instead of the matrix-free path. Experimental; default off.
   bool barrier_csr_ir_matvec{false};
+  i_t barrier_adaptive_regularization{-1};  // -1 automatic, 0 disabled, 1 enabled
   i_t barrier_soc_threshold{100};
   f_t barrier_step_scale{0.9};
+  // Relative complementarity tolerance for barrier method convergence (the "Compl." column in
+  // the barrier iteration log).
+  f_t barrier_complementarity_tol{1e-8};
   bool save_best_primal_so_far{false};
   /**
    * @brief Stop the solver as soon as a primal feasible iterate is encountered.

@@ -73,6 +73,7 @@ struct simplex_solver_settings_t {
       eliminate_dense_columns(true),
       barrier_iterative_refinement(barrier_iterative_refinement_t::GMRES),
       barrier_csr_ir_matvec(false),
+      barrier_adaptive_regularization(-1),
       barrier_step_scale(0.9),
       barrier_soc_threshold(100),
       num_gpus(1),
@@ -173,6 +174,7 @@ struct simplex_solver_settings_t {
   bool
     barrier_csr_ir_matvec;  // true to use a single cuSPARSE SpMV over the unperturbed augmented
                             // CSR for the IR matvec, instead of the matrix-free augmented_multiply
+  int barrier_adaptive_regularization;  // -1 automatic, 0 disabled, 1 enabled
   f_t barrier_step_scale;    // step scale for barrier method
   i_t barrier_soc_threshold;  // SOC dimension above which rank-2 sparse scaling is used
   int num_gpus;   // Number of GPUs to use (maximum of 2 gpus are supported at the moment)

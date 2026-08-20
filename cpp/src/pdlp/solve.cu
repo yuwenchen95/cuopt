@@ -566,6 +566,7 @@ std::tuple<simplex::lp_solution_t<i_t, f_t>, simplex::lp_status_t, f_t, f_t, f_t
   barrier_settings.eliminate_dense_columns         = settings.eliminate_dense_columns;
   barrier_settings.barrier_iterative_refinement    = settings.barrier_iterative_refinement;
   barrier_settings.barrier_csr_ir_matvec           = settings.barrier_csr_ir_matvec;
+  barrier_settings.barrier_adaptive_regularization = settings.barrier_adaptive_regularization;
   barrier_settings.barrier_soc_threshold           = settings.barrier_soc_threshold;
   barrier_settings.barrier_step_scale              = settings.barrier_step_scale;
   barrier_settings.qcqp_ruiz_equilibration         = settings.qcqp_ruiz_equilibration;
@@ -574,6 +575,7 @@ std::tuple<simplex::lp_solution_t<i_t, f_t>, simplex::lp_status_t, f_t, f_t, f_t
   barrier_settings.barrier_relaxed_feasibility_tol = settings.tolerances.relative_primal_tolerance;
   barrier_settings.barrier_relaxed_optimality_tol  = settings.tolerances.relative_dual_tolerance;
   barrier_settings.barrier_relaxed_complementarity_tol = settings.tolerances.relative_gap_tolerance;
+  barrier_settings.barrier_relative_complementarity_tol = settings.barrier_complementarity_tol;
   if (barrier_settings.concurrent_halt != nullptr) {
     // Don't show the barrier log in concurrent mode. Show the PDLP log instead
     barrier_settings.log.log = false;
@@ -744,28 +746,30 @@ static optimization_problem_solution_t<i_t, double> run_pdlp_solver_in_fp32(
     static_cast<float>(settings.tolerances.primal_infeasible_tolerance);
   fs.tolerances.dual_infeasible_tolerance =
     static_cast<float>(settings.tolerances.dual_infeasible_tolerance);
-  fs.detect_infeasibility         = settings.detect_infeasibility;
-  fs.strict_infeasibility         = settings.strict_infeasibility;
-  fs.iteration_limit              = settings.iteration_limit;
-  fs.time_limit                   = static_cast<float>(settings.time_limit);
-  fs.pdlp_solver_mode             = settings.pdlp_solver_mode;
-  fs.log_to_console               = settings.log_to_console;
-  fs.log_file                     = settings.log_file;
-  fs.per_constraint_residual      = settings.per_constraint_residual;
-  fs.save_best_primal_so_far      = settings.save_best_primal_so_far;
-  fs.first_primal_feasible        = settings.first_primal_feasible;
-  fs.all_primal_feasible          = settings.all_primal_feasible;
-  fs.eliminate_dense_columns      = settings.eliminate_dense_columns;
-  fs.barrier_iterative_refinement = settings.barrier_iterative_refinement;
-  fs.barrier_csr_ir_matvec        = settings.barrier_csr_ir_matvec;
-  fs.barrier_step_scale           = settings.barrier_step_scale;
-  fs.pdlp_precision               = pdlp_precision_t::DefaultPrecision;
-  fs.method                       = method_t::PDLP;
-  fs.inside_mip                   = settings.inside_mip;
-  fs.hyper_params                 = settings.hyper_params;
-  fs.presolver                    = settings.presolver;
-  fs.num_gpus                     = settings.num_gpus;
-  fs.concurrent_halt              = settings.concurrent_halt;
+  fs.detect_infeasibility            = settings.detect_infeasibility;
+  fs.strict_infeasibility            = settings.strict_infeasibility;
+  fs.iteration_limit                 = settings.iteration_limit;
+  fs.time_limit                      = static_cast<float>(settings.time_limit);
+  fs.pdlp_solver_mode                = settings.pdlp_solver_mode;
+  fs.log_to_console                  = settings.log_to_console;
+  fs.log_file                        = settings.log_file;
+  fs.per_constraint_residual         = settings.per_constraint_residual;
+  fs.save_best_primal_so_far         = settings.save_best_primal_so_far;
+  fs.first_primal_feasible           = settings.first_primal_feasible;
+  fs.all_primal_feasible             = settings.all_primal_feasible;
+  fs.eliminate_dense_columns         = settings.eliminate_dense_columns;
+  fs.barrier_iterative_refinement    = settings.barrier_iterative_refinement;
+  fs.barrier_csr_ir_matvec           = settings.barrier_csr_ir_matvec;
+  fs.barrier_adaptive_regularization = settings.barrier_adaptive_regularization;
+  fs.barrier_step_scale              = settings.barrier_step_scale;
+  fs.barrier_complementarity_tol     = static_cast<float>(settings.barrier_complementarity_tol);
+  fs.pdlp_precision                  = pdlp_precision_t::DefaultPrecision;
+  fs.method                          = method_t::PDLP;
+  fs.inside_mip                      = settings.inside_mip;
+  fs.hyper_params                    = settings.hyper_params;
+  fs.presolver                       = settings.presolver;
+  fs.num_gpus                        = settings.num_gpus;
+  fs.concurrent_halt                 = settings.concurrent_halt;
 
   pdlp::pdlp_solver_t<i_t, float> solver(float_problem, fs, is_batch_mode);
   if (settings.inside_mip) { solver.set_inside_mip(true); }

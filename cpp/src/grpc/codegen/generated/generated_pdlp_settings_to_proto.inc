@@ -37,6 +37,8 @@
   pb_settings->set_postsolve_info(settings.postsolve_info);
   pb_settings->set_cudss_nd_nlevels(settings.cudss_nd_nlevels);
   pb_settings->set_barrier_iterative_refinement(settings.barrier_iterative_refinement);
+  pb_settings->set_barrier_adaptive_regularization(settings.barrier_adaptive_regularization);
+  pb_settings->set_barrier_complementarity_tol(settings.barrier_complementarity_tol);
   pb_settings->set_save_best_primal_so_far(settings.save_best_primal_so_far);
   pb_settings->set_first_primal_feasible(settings.first_primal_feasible);
   pb_settings->set_pdlp_precision(static_cast<int32_t>(settings.pdlp_precision));
