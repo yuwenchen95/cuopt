@@ -392,6 +392,9 @@ class iteration_data_t {
       transform_reduce_helper_(lp.handle_ptr->get_stream()),
       transform_reduce_pair_helper_(lp.handle_ptr->get_stream()),
       sum_reduce_helper_(lp.handle_ptr->get_stream()),
+      d_scalar_batch_(kNumScalarBatchSlots, lp.handle_ptr->get_stream()),
+      h_scalar_batch_(kNumScalarBatchSlots),
+      d_reduce_tmp_(0, lp.handle_ptr->get_stream()),
       indefinite_Q(false),
       Q_diagonal(false),
       symbolic_status(0),
@@ -2639,6 +2642,14 @@ class iteration_data_t {
   transform_reduce_pair_helper_t<f_t> transform_reduce_pair_helper_;
   sum_reduce_helper_t<f_t> sum_reduce_helper_;
 
+  // Staging area for compute_residual_norms_mu_and_objective: several independent GPU
+  // reductions/dot-products write into slots of d_scalar_batch_, then a single copy into
+  // h_scalar_batch_ + one stream sync reads them all back at once instead of one sync each.
+  static constexpr i_t kNumScalarBatchSlots = 12;
+  rmm::device_uvector<f_t> d_scalar_batch_;
+  pinned_dense_vector_t<i_t, f_t> h_scalar_batch_;
+  rmm::device_buffer d_reduce_tmp_;
+
   bool cone_combined_step_;
   f_t cone_sigma_mu_;
 
@@ -4611,6 +4622,155 @@ void barrier_solver_t<i_t, f_t>::compute_primal_dual_objective(iteration_data_t<
 #endif
 }
 
+// Hot-loop fusion of compute_residual_norms + compute_mu + compute_primal_dual_objective: the
+// three functions above each read every reduction/dot-product result back individually via a
+// blocking rmm::device_scalar::value(stream) (cudaMemcpyAsync + full stream synchronize), even
+// though none of these values are used until well after all of them have been computed. This
+// version issues every reduction/dot-product kernel into a slot of data.d_scalar_batch_ and
+// defers the host readback to a single copy + a single sync at the end.
+template <typename i_t, typename f_t>
+void barrier_solver_t<i_t, f_t>::compute_residual_norms_mu_and_objective(
+  iteration_data_t<i_t, f_t>& data,
+  f_t& primal_residual_norm,
+  f_t& dual_residual_norm,
+  f_t& complementarity_residual_norm,
+  f_t& mu,
+  f_t& primal_objective,
+  f_t& dual_objective)
+{
+  raft::common::nvtx::range fun_scope("Barrier: compute_residual_norms_mu_and_objective");
+
+  gpu_compute_residuals(data.d_w_, data.d_x_, data.d_y_, data.d_v_, data.d_z_, data);
+
+  constexpr i_t kSlotPrimalResidual = 0;
+  constexpr i_t kSlotBoundResidual  = 1;
+  constexpr i_t kSlotDualResidual   = 2;
+  constexpr i_t kSlotComplXzLinear  = 3;
+  constexpr i_t kSlotComplWv        = 4;
+  constexpr i_t kSlotComplCone      = 5;
+  constexpr i_t kSlotMuXzSum        = 6;
+  constexpr i_t kSlotMuWvSum        = 7;
+  constexpr i_t kSlotCx             = 8;
+  constexpr i_t kSlotBy             = 9;
+  constexpr i_t kSlotUv             = 10;
+  constexpr i_t kSlotXQx            = 11;
+
+  f_t* d_batch = data.d_scalar_batch_.data();
+
+  const bool has_soc       = data.has_cones();
+  const i_t linear_xz_size = data.linear_xz_size(data.d_complementarity_xz_residual_.size());
+  auto linear_xz_span =
+    raft::device_span<const f_t>(data.d_complementarity_xz_residual_.data(), linear_xz_size);
+
+  // All enqueue calls below must stay on stream_view_: correctness relies on strict
+  // single-stream FIFO ordering, so that the single sync at the bottom is enough for every
+  // result to be ready on the host.
+  enqueue_norm_inf_into<i_t, f_t>(data.d_primal_residual_.data(),
+                                  data.d_primal_residual_.size(),
+                                  d_batch + kSlotPrimalResidual,
+                                  data.d_reduce_tmp_,
+                                  stream_view_);
+  enqueue_norm_inf_into<i_t, f_t>(data.d_bound_residual_.data(),
+                                  data.d_bound_residual_.size(),
+                                  d_batch + kSlotBoundResidual,
+                                  data.d_reduce_tmp_,
+                                  stream_view_);
+  enqueue_norm_inf_into<i_t, f_t>(data.d_dual_residual_.data(),
+                                  data.d_dual_residual_.size(),
+                                  d_batch + kSlotDualResidual,
+                                  data.d_reduce_tmp_,
+                                  stream_view_);
+  enqueue_norm_inf_into<i_t, f_t>(linear_xz_span.data(),
+                                  linear_xz_span.size(),
+                                  d_batch + kSlotComplXzLinear,
+                                  data.d_reduce_tmp_,
+                                  stream_view_);
+  enqueue_norm_inf_into<i_t, f_t>(data.d_complementarity_wv_residual_.data(),
+                                  data.d_complementarity_wv_residual_.size(),
+                                  d_batch + kSlotComplWv,
+                                  data.d_reduce_tmp_,
+                                  stream_view_);
+
+  if (has_soc) {
+    raft::device_span<f_t> cone_dot = data.cones().scratch.template get_slot<0>();
+    data.cones().segmented_sum(
+      data.d_complementarity_xz_residual_.data() + data.cone_start(), cone_dot, stream_view_);
+    enqueue_max_into<i_t, f_t>(
+      cone_dot.data(), cone_dot.size(), d_batch + kSlotComplCone, data.d_reduce_tmp_, stream_view_);
+  }
+
+  enqueue_sum_into<i_t, f_t>(data.d_complementarity_xz_residual_.data(),
+                             data.d_complementarity_xz_residual_.size(),
+                             d_batch + kSlotMuXzSum,
+                             data.d_reduce_tmp_,
+                             stream_view_);
+  enqueue_sum_into<i_t, f_t>(data.d_complementarity_wv_residual_.data(),
+                             data.d_complementarity_wv_residual_.size(),
+                             d_batch + kSlotMuWvSum,
+                             data.d_reduce_tmp_,
+                             stream_view_);
+
+  RAFT_CUBLAS_TRY(raft::linalg::detail::cublasdot(lp.handle_ptr->get_cublas_handle(),
+                                                  data.d_c_.size(),
+                                                  data.d_c_.data(),
+                                                  1,
+                                                  data.d_x_.data(),
+                                                  1,
+                                                  d_batch + kSlotCx,
+                                                  stream_view_));
+  RAFT_CUBLAS_TRY(raft::linalg::detail::cublasdot(lp.handle_ptr->get_cublas_handle(),
+                                                  data.d_b_.size(),
+                                                  data.d_b_.data(),
+                                                  1,
+                                                  data.d_y_.data(),
+                                                  1,
+                                                  d_batch + kSlotBy,
+                                                  stream_view_));
+  RAFT_CUBLAS_TRY(raft::linalg::detail::cublasdot(lp.handle_ptr->get_cublas_handle(),
+                                                  data.d_restrict_u_.size(),
+                                                  data.d_restrict_u_.data(),
+                                                  1,
+                                                  data.d_v_.data(),
+                                                  1,
+                                                  d_batch + kSlotUv,
+                                                  stream_view_));
+  if (data.Q.n > 0) {
+    auto cusparse_d_x = data.cusparse_view_.create_vector(data.d_x_);
+    auto cusparse_Qx  = data.cusparse_view_.create_vector(data.d_Qx_);
+    data.cusparse_Q_view_.spmv(1.0, cusparse_d_x, 0.0, cusparse_Qx);
+    RAFT_CUBLAS_TRY(raft::linalg::detail::cublasdot(lp.handle_ptr->get_cublas_handle(),
+                                                    data.d_Qx_.size(),
+                                                    data.d_Qx_.data(),
+                                                    1,
+                                                    data.d_x_.data(),
+                                                    1,
+                                                    d_batch + kSlotXQx,
+                                                    stream_view_));
+  }
+
+  raft::copy(data.h_scalar_batch_.data(),
+             data.d_scalar_batch_.data(),
+             data.kNumScalarBatchSlots,
+             stream_view_);
+  stream_view_.synchronize();
+
+  const f_t* h = data.h_scalar_batch_.data();
+
+  primal_residual_norm = std::max(h[kSlotPrimalResidual], h[kSlotBoundResidual]);
+  dual_residual_norm    = h[kSlotDualResidual];
+  complementarity_residual_norm = std::max(h[kSlotComplXzLinear], h[kSlotComplWv]);
+  if (has_soc) {
+    complementarity_residual_norm = std::max(complementarity_residual_norm, h[kSlotComplCone]);
+  }
+
+  const f_t mu_denom = data.complementarity_degree(data.x.size(), data.n_upper_bounds);
+  mu                 = (h[kSlotMuXzSum] + h[kSlotMuWvSum]) / mu_denom;
+
+  const f_t quad_objective = (data.Q.n > 0) ? 0.5 * h[kSlotXQx] : f_t(0);
+  primal_objective = h[kSlotCx] + quad_objective;
+  dual_objective    = h[kSlotBy] - h[kSlotUv] - quad_objective;
+}
+
 template <typename i_t, typename f_t>
 lp_status_t barrier_solver_t<i_t, f_t>::check_for_suboptimal_solution(
   iteration_data_t<i_t, f_t>& data,
@@ -5044,12 +5204,13 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
 
       compute_next_iterate(data, settings.barrier_step_scale, step_primal, step_dual);
 
-      compute_residual_norms(
-        data, primal_residual_norm, dual_residual_norm, complementarity_residual_norm);
-
-      compute_mu(data, mu);
-
-      compute_primal_dual_objective(data, primal_objective, dual_objective);
+      compute_residual_norms_mu_and_objective(data,
+                                              primal_residual_norm,
+                                              dual_residual_norm,
+                                              complementarity_residual_norm,
+                                              mu,
+                                              primal_objective,
+                                              dual_objective);
 
       relative_primal_residual = primal_residual_norm / (1.0 + norm_b);
       relative_dual_residual   = dual_residual_norm / (1.0 + norm_c);
