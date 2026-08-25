@@ -569,7 +569,7 @@ class iteration_data_t {
         if (n_dense_rows > 0) {
           settings.log.printf("Dense rows                  : %d\n", n_dense_rows);
         }
-        settings.log.printf("Density estimator time      : %.2fs\n", column_density_time);
+        settings.log.printf("Density estimator time      : %.4fs\n", column_density_time);
         if ((settings.augmented != 0) &&
             (n_dense_columns > 50 || n_dense_rows > 10 ||
              lp.A.m == 0 /* handle case with no constraints */ ||
@@ -1407,7 +1407,7 @@ class iteration_data_t {
     float64_t adat_time = toc(start_form_adat);
 
     if (num_factorizations == 0) {
-      settings_.log.printf("ADAT time                   : %.2fs\n", adat_time);
+      settings_.log.printf("ADAT time                   : %.4fs\n", adat_time);
       settings_.log.printf("ADAT nonzeros               : %.2e\n",
                            static_cast<float64_t>(adat_nnz));
       settings_.log.printf(
@@ -4806,7 +4806,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::check_for_suboptimal_solution(
                      solution);
     settings.log.printf("\n");
     settings.log.printf(
-      "Suboptimal solution found in %d iterations and %.2f seconds\n", iter, toc(start_time));
+      "Suboptimal solution found in %d iterations and %.4f seconds\n", iter, toc(start_time));
     settings.log.printf("Objective %+.8e\n", compute_user_objective(lp, primal_objective));
     settings.log.printf("Primal infeasibility (abs/rel): %8.2e/%8.2e\n",
                         primal_residual_norm,
@@ -4845,7 +4845,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::check_for_suboptimal_solution(
                      solution);
     settings.log.printf("\n");
     settings.log.printf(
-      "Suboptimal solution found in %d iterations and %.2f seconds\n", iter, toc(start_time));
+      "Suboptimal solution found in %d iterations and %.4f seconds\n", iter, toc(start_time));
     settings.log.printf("Objective %+.8e\n", compute_user_objective(lp, primal_objective_save));
     settings.log.printf("Primal infeasibility (abs/rel): %8.2e/%8.2e\n",
                         data.primal_residual_norm_save,
@@ -4979,7 +4979,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
     data.cusparse_y_residual_    = data.cusparse_view_.create_vector(data.d_y_residual_);
     data.restrict_u_.resize(num_upper_bounds);
 
-    settings.log.printf("Elapsed time                : %.2fs\n", toc(start_time));
+    settings.log.printf("Elapsed time                : %.4fs\n", toc(start_time));
 
     if (toc(start_time) > settings.time_limit) {
       settings.log.printf("Barrier time limit exceeded\n");
@@ -5088,7 +5088,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
     settings.log.printf(
       "Iter   Primal              Dual                Primal   Dual    Compl.   Elapsed\n");
     float64_t elapsed_time = toc(start_time);
-    settings.log.printf("%3d   %+.12e %+.12e %.2e %.2e %.2e %.1f\n",
+    settings.log.printf("%3d   %+.12e %+.12e %.2e %.2e %.2e %.3f\n",
                         iter,
                         compute_user_objective(lp, primal_objective),
                         compute_user_objective(lp, dual_objective),
@@ -5280,7 +5280,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
                                                             solution));
       }
 
-      settings.log.printf("%3d   %+.12e %+.12e %.2e %.2e %.2e %.1f\n",
+      settings.log.printf("%3d   %+.12e %+.12e %.2e %.2e %.2e %.3f\n",
                           iter,
                           compute_user_objective(lp, primal_objective),
                           compute_user_objective(lp, dual_objective),
@@ -5301,7 +5301,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
       if (converged) {
         settings.log.printf("\n");
         settings.log.printf(
-          "Optimal solution found in %d iterations and %.3fs\n", iter, toc(start_time));
+          "Optimal solution found in %d iterations and %.5fs\n", iter, toc(start_time));
         settings.log.printf("Objective %+.8e\n", compute_user_objective(lp, primal_objective));
         settings.log.printf("Primal infeasibility (abs/rel): %8.2e/%8.2e\n",
                             primal_residual_norm,
