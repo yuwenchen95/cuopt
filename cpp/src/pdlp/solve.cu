@@ -1939,18 +1939,24 @@ optimization_problem_solution_t<i_t, f_t> solve_qcqp(
     // Convert data structures to dual simplex format and back
     simplex::user_problem_t<i_t, f_t> dual_simplex_problem =
       cuopt_optimization_problem_to_user_problem<i_t, f_t>(op_problem.get_handle_ptr(), op_problem);
-    auto sol_dual_simplex = run_barrier(dual_simplex_problem,
-                                        settings,
-                                        qcqp_timer,
-                                        op_problem.get_handle_ptr(),
-                                        settings.lp_solve_session);
-    auto solution = convert_dual_simplex_sol(op_problem,
-                                             std::get<0>(sol_dual_simplex),
-                                             std::get<1>(sol_dual_simplex),
-                                             std::get<2>(sol_dual_simplex),
-                                             std::get<3>(sol_dual_simplex),
-                                             std::get<4>(sol_dual_simplex),
-                                             method_t::Barrier);
+    auto sol_dual_simplex = [&] {
+      raft::common::nvtx::range fun_scope_run_barrier("QCQP: run_barrier");
+      return run_barrier(dual_simplex_problem,
+                         settings,
+                         qcqp_timer,
+                         op_problem.get_handle_ptr(),
+                         settings.lp_solve_session);
+    }();
+    auto solution = [&] {
+      raft::common::nvtx::range fun_scope_convert_sol("QCQP: convert_dual_simplex_sol");
+      return convert_dual_simplex_sol(op_problem,
+                                      std::get<0>(sol_dual_simplex),
+                                      std::get<1>(sol_dual_simplex),
+                                      std::get<2>(sol_dual_simplex),
+                                      std::get<3>(sol_dual_simplex),
+                                      std::get<4>(sol_dual_simplex),
+                                      method_t::Barrier);
+    }();
 
     if (has_qc) {
       CUOPT_LOG_INFO("Dual variables for problems with quadratic constraints not returned.");

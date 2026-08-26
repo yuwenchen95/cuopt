@@ -70,6 +70,13 @@ class barrier_solver_t {
   void compute_primal_dual_objective(iteration_data_t<i_t, f_t>& data,
                                      f_t& primal_objective,
                                      f_t& dual_objective);
+  void compute_residual_norms_mu_and_objective(iteration_data_t<i_t, f_t>& data,
+                                               f_t& primal_residual_norm,
+                                               f_t& dual_residual_norm,
+                                               f_t& complementarity_residual_norm,
+                                               f_t& mu,
+                                               f_t& primal_objective,
+                                               f_t& dual_objective);
 
   // To be able to directly pass lambdas to transform functions
  public:

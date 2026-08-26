@@ -30,6 +30,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <queue>
 #include <string>
 
@@ -361,6 +362,7 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
                                               cuopt::cython::lp_solve_session_t* session,
                                               const raft::handle_t* handle_ptr)
 {
+  raft::common::nvtx::range fun_scope("Barrier: solve_linear_program_with_barrier");
   lp_status_t status = lp_status_t::UNSET;
   lp_problem_t<i_t, f_t> original_lp(handle_ptr, 1, 1, 1);
 
@@ -368,7 +370,10 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
   std::vector<i_t> new_slacks;
   simplex_solver_settings_t<i_t, f_t> barrier_settings = settings;
   dualize_info_t<i_t, f_t> dualize_info;
-  convert_user_problem(user_problem, barrier_settings, original_lp, new_slacks, dualize_info);
+  {
+    raft::common::nvtx::range scope("Barrier: convert_user_problem");
+    convert_user_problem(user_problem, barrier_settings, original_lp, new_slacks, dualize_info);
+  }
   if (!barrier::validate_barrier_cone_layout(original_lp, barrier_settings)) {
     return lp_status_t::NUMERICAL_ISSUES;
   }
@@ -378,7 +383,11 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
   // Presolve the linear program
   presolve_info_t<i_t, f_t> presolve_info;
   lp_problem_t<i_t, f_t> presolved_lp(handle_ptr, 1, 1, 1);
-  const i_t ok = presolve(original_lp, barrier_settings, presolved_lp, presolve_info);
+  i_t ok;
+  {
+    raft::common::nvtx::range scope("Barrier: presolve");
+    ok = presolve(original_lp, barrier_settings, presolved_lp, presolve_info);
+  }
   if (ok == CONCURRENT_HALT_RETURN) { return lp_status_t::CONCURRENT_LIMIT; }
   if (ok == TIME_LIMIT_RETURN) { return lp_status_t::TIME_LIMIT; }
   if (ok == -1) { return lp_status_t::INFEASIBLE; }
@@ -390,15 +399,27 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
                                     presolved_lp.A.col_start[presolved_lp.num_cols]);
   std::vector<f_t> column_scales;
   std::vector<f_t> row_scales;
-  scaling(presolved_lp, barrier_settings, barrier_lp, column_scales, row_scales);
+  {
+    raft::common::nvtx::range scope("Barrier: scaling");
+    scaling(presolved_lp, barrier_settings, barrier_lp, column_scales, row_scales);
+  }
 
   // Solve using barrier
   lp_solution_t<i_t, f_t> barrier_solution(barrier_lp.num_rows, barrier_lp.num_cols);
 
-  barrier::barrier_solver_t<i_t, f_t> barrier_solver(barrier_lp, presolve_info, barrier_settings);
-  lp_status_t barrier_status = barrier_solver.solve(start_time, barrier_solution, session);
+  lp_status_t barrier_status;
+  {
+    std::unique_ptr<barrier::barrier_solver_t<i_t, f_t>> barrier_solver;
+    {
+      raft::common::nvtx::range scope("Barrier: barrier_solver_t construction");
+      barrier_solver = std::make_unique<barrier::barrier_solver_t<i_t, f_t>>(
+        barrier_lp, presolve_info, barrier_settings);
+    }
+    barrier_status = barrier_solver->solve(start_time, barrier_solution, session);
+  }
 
   if (barrier_status == lp_status_t::OPTIMAL) {
+    raft::common::nvtx::range fun_scope_postprocess("Barrier: postprocess solution");
 #ifdef COMPUTE_SCALED_RESIDUALS
     std::vector<f_t> scaled_residual = barrier_lp.rhs;
     matrix_vector_multiply(barrier_lp.A, 1.0, barrier_solution.x, -1.0, scaled_residual);
@@ -450,15 +471,18 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
     }
 
     // Undo presolve
-    uncrush_solution(presolve_info,
-                     barrier_settings,
-                     original_lp,
-                     unscaled_x,
-                     unscaled_y,
-                     unscaled_z,
-                     lp_solution.x,
-                     lp_solution.y,
-                     lp_solution.z);
+    {
+      raft::common::nvtx::range scope("Barrier: uncrush_solution");
+      uncrush_solution(presolve_info,
+                       barrier_settings,
+                       original_lp,
+                       unscaled_x,
+                       unscaled_y,
+                       unscaled_z,
+                       lp_solution.x,
+                       lp_solution.y,
+                       lp_solution.z);
+    }
 
     if (settings.postsolve_info == 1) {
       std::vector<f_t> post_solve_residual = original_lp.rhs;
@@ -616,6 +640,7 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
   if (!settings.crossover || barrier_lp.Q.n > 0) { return barrier_status; }
 
   if (settings.crossover && barrier_status == lp_status_t::OPTIMAL) {
+    raft::common::nvtx::range fun_scope_crossover("Barrier: crossover");
     {
       std::vector<f_t> rhs = original_lp.rhs;
       matrix_vector_multiply(original_lp.A, 1.0, lp_solution.x, -1.0, rhs);
