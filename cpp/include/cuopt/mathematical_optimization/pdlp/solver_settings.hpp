@@ -318,6 +318,11 @@ class pdlp_solver_settings_t {
   // solver's IR matvec, instead of the matrix-free path. Experimental; default off.
   bool barrier_csr_ir_matvec{false};
   i_t barrier_adaptive_regularization{-1};  // -1 automatic, 0 disabled, 1 enabled
+  // Initial regularization for the barrier method's augmented KKT system, applied to the first
+  // factorization only (adaptive regularization, if enabled, still scales it up/down on later
+  // iterations). -1 automatic (uses the built-in heuristic), else the literal starting value.
+  f_t barrier_primal_perturb{-1.0};
+  f_t barrier_dual_perturb{-1.0};
   i_t barrier_soc_threshold{100};
   f_t barrier_step_scale{0.9};
   // Relative complementarity tolerance for barrier method convergence (the "Compl." column in

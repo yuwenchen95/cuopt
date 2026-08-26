@@ -74,6 +74,8 @@ struct simplex_solver_settings_t {
       barrier_iterative_refinement(barrier_iterative_refinement_t::GMRES),
       barrier_csr_ir_matvec(false),
       barrier_adaptive_regularization(-1),
+      barrier_primal_perturb(-1.0),
+      barrier_dual_perturb(-1.0),
       barrier_step_scale(0.9),
       barrier_soc_threshold(100),
       num_gpus(1),
@@ -175,7 +177,14 @@ struct simplex_solver_settings_t {
     barrier_csr_ir_matvec;  // true to use a single cuSPARSE SpMV over the unperturbed augmented
                             // CSR for the IR matvec, instead of the matrix-free augmented_multiply
   int barrier_adaptive_regularization;  // -1 automatic, 0 disabled, 1 enabled
-  f_t barrier_step_scale;    // step scale for barrier method
+  f_t barrier_primal_perturb;  // -1 automatic (has_soc ? 1e-8 : 1e-6), else user-specified initial
+                               // primal regularization (augmented system's (2,2) block) for the
+                               // first barrier factorization. Adaptive regularization (if enabled)
+                               // still scales it up/down from this starting point on later iters.
+  f_t barrier_dual_perturb;   // -1 automatic (adaptive_reg ? 1e-8 : 0), else user-specified initial
+                              // dual regularization (augmented system's (1,1) block diagonal) for
+                              // the first barrier factorization. Same adaptive caveat as above.
+  f_t barrier_step_scale;     // step scale for barrier method
   i_t barrier_soc_threshold;  // SOC dimension above which rank-2 sparse scaling is used
   int num_gpus;   // Number of GPUs to use (maximum of 2 gpus are supported at the moment)
   i_t folding;    // -1 automatic, 0 don't fold, 1 fold

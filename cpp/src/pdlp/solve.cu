@@ -567,6 +567,8 @@ std::tuple<simplex::lp_solution_t<i_t, f_t>, simplex::lp_status_t, f_t, f_t, f_t
   barrier_settings.barrier_iterative_refinement    = settings.barrier_iterative_refinement;
   barrier_settings.barrier_csr_ir_matvec           = settings.barrier_csr_ir_matvec;
   barrier_settings.barrier_adaptive_regularization = settings.barrier_adaptive_regularization;
+  barrier_settings.barrier_primal_perturb          = settings.barrier_primal_perturb;
+  barrier_settings.barrier_dual_perturb            = settings.barrier_dual_perturb;
   barrier_settings.barrier_soc_threshold           = settings.barrier_soc_threshold;
   barrier_settings.barrier_step_scale              = settings.barrier_step_scale;
   barrier_settings.qcqp_ruiz_equilibration         = settings.qcqp_ruiz_equilibration;
@@ -761,6 +763,8 @@ static optimization_problem_solution_t<i_t, double> run_pdlp_solver_in_fp32(
   fs.barrier_iterative_refinement    = settings.barrier_iterative_refinement;
   fs.barrier_csr_ir_matvec           = settings.barrier_csr_ir_matvec;
   fs.barrier_adaptive_regularization = settings.barrier_adaptive_regularization;
+  fs.barrier_primal_perturb          = settings.barrier_primal_perturb;
+  fs.barrier_dual_perturb            = settings.barrier_dual_perturb;
   fs.barrier_step_scale              = settings.barrier_step_scale;
   fs.barrier_complementarity_tol     = static_cast<float>(settings.barrier_complementarity_tol);
   fs.pdlp_precision                  = pdlp_precision_t::DefaultPrecision;
@@ -1952,6 +1956,12 @@ optimization_problem_solution_t<i_t, f_t> solve_qcqp(
       CUOPT_LOG_INFO("Dual variables for problems with quadratic constraints not returned.");
       const f_t nan_val = std::numeric_limits<f_t>::quiet_NaN();
       auto stream       = op_problem.get_handle_ptr()->get_stream();
+      // solve_qcqp() reformulates quadratic constraints into second-order cones, which grows
+      // the internal row/column count beyond the documented num_constraints/num_variables.
+      // Resize back down to the documented lengths.
+      solution.get_dual_solution().resize(
+        op_problem.get_n_constraints() + op_problem.get_quadratic_constraints().size(), stream);
+      solution.get_reduced_cost().resize(op_problem.get_n_variables(), stream);
       thrust::fill(rmm::exec_policy(stream),
                    solution.get_dual_solution().begin(),
                    solution.get_dual_solution().end(),

@@ -534,8 +534,10 @@ class iteration_data_t {
       // Apply the adaptive-regularization policy before form_augmented / initial
       // factorization so an explicit enable/disable is honored from the start.
       const bool adaptive_reg = should_use_adaptive_regularization(settings, has_soc);
-      primal_perturb          = has_soc ? 1e-8 : 1e-6;
-      dual_perturb            = adaptive_reg ? 1e-8 : 0;
+      primal_perturb = (settings.barrier_primal_perturb >= 0) ? settings.barrier_primal_perturb
+                                                              : (has_soc ? 1e-8 : 1e-6);
+      dual_perturb   = (settings.barrier_dual_perturb >= 0) ? settings.barrier_dual_perturb
+                                                            : (adaptive_reg ? 1e-8 : 0);
 
       if (has_soc) {
         // SOCP always use the augmented KKT; skip dense-column / ADAT heuristics.
@@ -4808,6 +4810,15 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
       settings.log.printf("Adaptive regularization enabled\n");
     }
 
+    // Handle automatic adaptive regularization (-1: auto, 0: off, 1: on).
+    // Policy is already applied to data.dual_perturb during construction
+    // (before form_augmented / initial_point).
+    const bool adaptive_regularization =
+      should_use_adaptive_regularization(settings, data.has_cones());
+    if (settings.barrier_adaptive_regularization == -1 && adaptive_regularization) {
+      settings.log.printf("Adaptive regularization enabled\n");
+    }
+
     i_t initial_status = initial_point(data);
     if (toc(start_time) > settings.time_limit) {
       settings.log.printf("Barrier time limit exceeded\n");
@@ -4917,8 +4928,10 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(f_t start_time,
     const i_t iteration_limit = settings.iteration_limit;
 
     // Adaptive regularization for the augmented system.
-    f_t dual_perturb   = adaptive_regularization ? 1e-8 : 0;
-    f_t primal_perturb = data.has_cones() ? 1e-8 : 1e-6;
+    f_t dual_perturb   = (settings.barrier_dual_perturb >= 0) ? settings.barrier_dual_perturb
+                                                              : (adaptive_regularization ? 1e-8 : 0);
+    f_t primal_perturb = (settings.barrier_primal_perturb >= 0) ? settings.barrier_primal_perturb
+                                                                : (data.has_cones() ? 1e-8 : 1e-6);
 
     while (iter < iteration_limit) {
       raft::common::nvtx::range fun_scope("Barrier: iteration");
