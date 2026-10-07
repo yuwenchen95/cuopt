@@ -15,6 +15,8 @@
 #include <hwy/per_target.h>
 #include <hwy/targets.h>
 
+#include <raft/core/nvtx.hpp>
+
 #include <fcntl.h>
 #include <sched.h>
 #include <unistd.h>
@@ -276,14 +278,30 @@ void print_version_info(int num_devices)
                  CUOPT_CPU_ARCHITECTURE,
                  CUOPT_CUDA_ARCHITECTURES);
 
-  const auto memory = get_host_memory_info();
+  host_memory_info_t memory;
+  {
+    raft::common::nvtx::range scope("Version info: host memory");
+    memory = get_host_memory_info();
+  }
   int allowed_cpus[CPU_SETSIZE];
-  const int allowed_count = get_allowed_cpus(allowed_cpus, CPU_SETSIZE);
+  int allowed_count = 0;
+  {
+    raft::common::nvtx::range scope("Version info: allowed CPUs");
+    allowed_count = get_allowed_cpus(allowed_cpus, CPU_SETSIZE);
+  }
   char cpu_model[256];
-  get_cpu_model(cpu_model, sizeof(cpu_model));
+  {
+    raft::common::nvtx::range scope("Version info: CPU model");
+    get_cpu_model(cpu_model, sizeof(cpu_model));
+  }
+  int physical_cores = 0;
+  {
+    raft::common::nvtx::range scope("Version info: physical cores");
+    physical_cores = get_physical_cores(allowed_cpus, allowed_count);
+  }
   CUOPT_LOG_INFO("CPU: %s, threads: %dC/%dT, RAM usage: %.2f/%.2fGiB",
                  cpu_model,
-                 get_physical_cores(allowed_cpus, allowed_count),
+                 physical_cores,
                  allowed_count,
                  std::max(0.0, memory.total_gb - memory.available_gb),
                  memory.total_gb);
@@ -291,7 +309,12 @@ void print_version_info(int num_devices)
 
   for (int device_id = 0; device_id < num_devices; ++device_id) {
     cudaDeviceProp device_prop{};
-    if (cudaGetDeviceProperties(&device_prop, device_id) != cudaSuccess) {
+    cudaError_t prop_status;
+    {
+      raft::common::nvtx::range scope("Version info: cudaGetDeviceProperties");
+      prop_status = cudaGetDeviceProperties(&device_prop, device_id);
+    }
+    if (prop_status != cudaSuccess) {
       CUOPT_LOG_WARN("Failed to query CUDA device properties for device ID %d", device_id);
       continue;
     }

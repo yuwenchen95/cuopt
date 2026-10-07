@@ -22,6 +22,7 @@
 #include <thrust/transform_reduce.h>
 
 #include <cuda/std/array>
+#include <raft/core/nvtx.hpp>
 #include <rmm/device_uvector.hpp>
 
 #include <algorithm>
@@ -257,10 +258,13 @@ f_t iterative_refinement_gmres(T& op,
   int outer_iter = 0;
 
   // r = b - A*x
-  raft::copy(r.data(), b.data(), b.size(), x.stream());
-  op.a_multiply(-1.0, x, 1.0, r);
-
-  f_t norm_r = vector_norm_inf(r, workspace.reductions);
+  f_t norm_r;
+  {
+    raft::common::nvtx::range scope("GMRES: initial residual");
+    raft::copy(r.data(), b.data(), b.size(), x.stream());
+    op.a_multiply(-1.0, x, 1.0, r);
+    norm_r = vector_norm_inf(r, workspace.reductions);
+  }
   if (show_info) { CUOPT_LOG_INFO("GMRES IR: initial residual = %e, |b| = %e", norm_r, bnorm); }
   if (norm_r <= tol) { return norm_r; }
 
@@ -274,15 +278,19 @@ f_t iterative_refinement_gmres(T& op,
     auto& V = workspace.V;
     auto& Z = workspace.Z;
     // v0 = r / ||r||
-    f_t rnorm     = vector_norm2(r, workspace.reductions);
-    f_t inv_rnorm = (rnorm > 0) ? (f_t(1) / rnorm) : f_t(1);
+    f_t rnorm;
+    {
+      raft::common::nvtx::range scope("GMRES: restart setup (v0 = r / ||r||)");
+      rnorm         = vector_norm2(r, workspace.reductions);
+      f_t inv_rnorm = (rnorm > 0) ? (f_t(1) / rnorm) : f_t(1);
 
-    thrust::transform(rmm::exec_policy_nosync(op.data_.handle_ptr->get_stream()),
-                      r.data(),
-                      r.data() + r.size(),
-                      V[0].data(),
-                      scale_op<f_t>{inv_rnorm});
-    RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+      thrust::transform(rmm::exec_policy_nosync(op.data_.handle_ptr->get_stream()),
+                        r.data(),
+                        r.data() + r.size(),
+                        V[0].data(),
+                        scale_op<f_t>{inv_rnorm});
+      RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+    }
     e1.assign(m + 1, 0.0);
     e1[0] = rnorm;
 
@@ -290,15 +298,24 @@ f_t iterative_refinement_gmres(T& op,
     int k = 0;
     for (; k < m; ++k) {
       // Z[k] = M^{-1} V[k], i.e., apply right preconditioner and store
-      op.solve(V[k], Z[k]);
+      {
+        raft::common::nvtx::range scope("GMRES: preconditioner solve");
+        op.solve(V[k], Z[k]);
 
-      // Check if solve produced NaN (indicates cuDSS failure)
-      workspace.check_preconditioner_async(Z[k]);
+        // Check if solve produced NaN (indicates cuDSS failure)
+        workspace.check_preconditioner_async(Z[k]);
+      }
 
       // Stream-ordered dot/update pairs retain modified Gram-Schmidt while
       // deferring host scalar reads until the complete column is available.
-      op.a_multiply(1.0, Z[k], 0.0, V[k + 1]);
-      workspace.orthogonalize(k);
+      {
+        raft::common::nvtx::range scope("GMRES: matvec");
+        op.a_multiply(1.0, Z[k], 0.0, V[k + 1]);
+      }
+      {
+        raft::common::nvtx::range scope("GMRES: orthogonalize");
+        workspace.orthogonalize(k);
+      }
       f_t z_norm = workspace.h_column[m + 1];
       if (!std::isfinite(z_norm)) {
         CUOPT_LOG_INFO("GMRES IR: solve at k=%d produced NaN, terminating", k);
@@ -327,13 +344,16 @@ f_t iterative_refinement_gmres(T& op,
       H[k + 1][k] = h_k1k;
 
       // V[k+1] = V[k+1] / H[k+1][k]
-      f_t inv_h = f_t(1) / h_k1k;
-      thrust::transform(rmm::exec_policy_nosync(op.data_.handle_ptr->get_stream()),
-                        V[k + 1].data(),
-                        V[k + 1].data() + x.size(),
-                        V[k + 1].data(),
-                        scale_op<f_t>{inv_h});
-      RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+      {
+        raft::common::nvtx::range scope("GMRES: normalize v[k+1]");
+        f_t inv_h = f_t(1) / h_k1k;
+        thrust::transform(rmm::exec_policy_nosync(op.data_.handle_ptr->get_stream()),
+                          V[k + 1].data(),
+                          V[k + 1].data() + x.size(),
+                          V[k + 1].data(),
+                          scale_op<f_t>{inv_h});
+        RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+      }
 
       // Apply Given's rotations to new column
       for (int i = 0; i < k; ++i) {
@@ -380,13 +400,19 @@ f_t iterative_refinement_gmres(T& op,
     }
 
     // Preserve the sequential basis accumulation without a temporary vector.
-    workspace.update(x, y, k);
-    RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+    {
+      raft::common::nvtx::range scope("GMRES: update x");
+      workspace.update(x, y, k);
+      RAFT_CHECK_CUDA(op.data_.handle_ptr->get_stream().get());
+    }
     // r = b - A*x
-    raft::copy(r.data(), b.data(), b.size(), x.stream());
-    op.a_multiply(-1.0, x, 1.0, r);
+    {
+      raft::common::nvtx::range scope("GMRES: true residual");
+      raft::copy(r.data(), b.data(), b.size(), x.stream());
+      op.a_multiply(-1.0, x, 1.0, r);
 
-    residual = vector_norm_inf(r, workspace.reductions);
+      residual = vector_norm_inf(r, workspace.reductions);
+    }
 
     if (show_info) {
       auto l2_residual = vector_norm2(r, workspace.reductions);

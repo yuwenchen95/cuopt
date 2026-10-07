@@ -1993,11 +1993,20 @@ optimization_problem_solution_t<i_t, f_t> solve_qcqp(
 {
   try {
     // Create log stream for file logging and add it to default logger
-    init_logger_t log(settings.log_file, settings.log_to_console);
-    print_version_info();
+    init_logger_t log = [&] {
+      raft::common::nvtx::range scope("QCQP: init logger");
+      return init_logger_t(settings.log_file, settings.log_to_console);
+    }();
+    {
+      raft::common::nvtx::range scope("QCQP: print_version_info");
+      print_version_info();
+    }
 
     // Init libraries before to not include it in solve time
-    init_handler(op_problem.get_handle_ptr());
+    {
+      raft::common::nvtx::range scope("QCQP: init_handler");
+      init_handler(op_problem.get_handle_ptr());
+    }
 
     auto qcqp_timer = cuopt::timer_t(settings.time_limit);
 
@@ -2019,6 +2028,7 @@ optimization_problem_solution_t<i_t, f_t> solve_qcqp(
       op_problem.get_n_constraints() == model_num_rows(*xf);
 
     if (problem_checking && !reuse_from_cache) {
+      raft::common::nvtx::range scope("QCQP: check problem");
       problem_checking_t<i_t, f_t>::check_problem_representation(op_problem);
       if (problem_checking_t<i_t, f_t>::has_crossing_bounds(op_problem)) {
         return optimization_problem_solution_t<i_t, f_t>(
