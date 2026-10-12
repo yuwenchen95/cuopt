@@ -47,7 +47,7 @@
 #define CUOPT_AUGMENTED                                 "augmented"
 #define CUOPT_DUALIZE                                   "dualize"
 #define CUOPT_ORDERING                                  "ordering"
-#define CUOPT_BARRIER_INITIAL_POINT                     "barrier_initial_point"
+#define CUOPT_BARRIER_DUAL_INITIAL_POINT                "barrier_dual_initial_point"
 #define CUOPT_POSTSOLVE_INFO                            "postsolve_info"
 #define CUOPT_BARRIER_PRESOLVE_BOUND_FREE_VARIABLES     "barrier_presolve_bound_free_variables"
 #define CUOPT_BARRIER_PRESOLVE_ELIMINATE_FREE_VARIABLES "barrier_presolve_eliminate_free_variables"

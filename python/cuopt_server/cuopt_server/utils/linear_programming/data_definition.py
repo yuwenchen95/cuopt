@@ -496,7 +496,7 @@ class SolverConfig(BaseModel):
         description="Set the type of ordering to use for the barrier solver."
         "-1 for automatic, 0 to use cuDSS default ordering, 1 to use AMD",
     )
-    barrier_initial_point: Optional[int] = Field(
+    barrier_dual_initial_point: Optional[int] = Field(
         default=-1,
         description="Set the type of initial point to use for the barrier"
         "solver. -1 for automatic, 0 to use Lustig, Marsten, and Shanno"
