@@ -5,14 +5,7 @@
  */
 /* clang-format on */
 
-// Papilo's ProbingView::reset() guards bounds restoration with #ifndef NDEBUG.
-// This causes invalid (-1) column indices due to bugs in the Probing presolver.
-// Force-include ProbingView.hpp with NDEBUG undefined so the restoration is compiled in.
-#ifdef NDEBUG
-#undef NDEBUG
 #include <papilo/core/ProbingView.hpp>
-#define NDEBUG
-#endif
 
 #include <PSLP/PSLP_sol.h>
 #include <PSLP/PSLP_stats.h>
@@ -42,8 +35,10 @@
 #include <mip_heuristics/mip_constants.hpp>
 #include <mip_heuristics/presolve/bhw_coeff_reduce.hpp>
 #include <mip_heuristics/presolve/gf2_presolve.hpp>
+#include <mip_heuristics/presolve/indicator_strengthening.hpp>
 #include <mip_heuristics/presolve/single_lock_dual_aggregation.hpp>
 #include <mip_heuristics/presolve/third_party_presolve.hpp>
+#include <mip_heuristics/utils.hpp>
 #include <utilities/logger.hpp>
 #include <utilities/macros.cuh>
 #include <utilities/timer.hpp>
@@ -59,8 +54,6 @@
 #include <unordered_map>
 
 namespace cuopt::mathematical_optimization::mip {
-
-static constexpr int papilo_thread_limit = 4;
 
 // Backend-agnostic normalisation of the mutable presolve fields:
 //   * sign-flip `obj_coeffs` / `objective_offset` when maximise,
@@ -84,23 +77,7 @@ void normalize_for_presolve(io::mps_data_model_t<i_t, f_t> const& mps,
     }
     objective_offset = -objective_offset;
   }
-
-  if (constr_lb.empty() && constr_ub.empty()) {
-    const auto& row_types         = mps.get_row_types();
-    const auto& constraint_bounds = mps.get_constraint_bounds();
-    for (size_t i = 0; i < row_types.size(); ++i) {
-      if (row_types[i] == 'L') {
-        constr_lb.push_back(-std::numeric_limits<f_t>::infinity());
-        constr_ub.push_back(constraint_bounds[i]);
-      } else if (row_types[i] == 'G') {
-        constr_lb.push_back(constraint_bounds[i]);
-        constr_ub.push_back(std::numeric_limits<f_t>::infinity());
-      } else if (row_types[i] == 'E') {
-        constr_lb.push_back(constraint_bounds[i]);
-        constr_ub.push_back(constraint_bounds[i]);
-      }
-    }
-  }
+  expand_rhs(mps, constr_lb, constr_ub);
 }
 
 // Build a papilo::Problem
@@ -747,8 +724,8 @@ void set_presolve_methods(
 
   if (category == problem_category_t::MIP) {
     // cuOpt custom GF2 presolver
-    maybe_add(uptr(new cuopt::mathematical_optimization::mip::GF2Presolve<f_t>()));
-    maybe_add(uptr(new cuopt::mathematical_optimization::mip::BHWCoeffReduce<f_t>()));
+    maybe_add(uptr(new GF2Presolve<f_t>()));
+    maybe_add(uptr(new BHWCoeffReduce<f_t>()));
   }
   // fast presolvers
   maybe_add(uptr(new papilo::SingletonCols<f_t>()));
@@ -797,7 +774,8 @@ void set_presolve_options(papilo::Presolve<f_t>& presolver,
 {
   presolver.getPresolveOptions().tlim = time_limit;
   presolver.getPresolveOptions().threads =
-    num_cpu_threads > 0 ? std::min<i_t>(num_cpu_threads, papilo_thread_limit) : papilo_thread_limit;
+    num_cpu_threads > 0 ? std::min<i_t>(num_cpu_threads, CUOPT_MIP_PAPILO_THREAD_LIMIT)
+                        : CUOPT_MIP_PAPILO_THREAD_LIMIT;
   presolver.getPresolveOptions().feastol = 1e-5;
   if (max_rounds > 0) { presolver.getPresolveOptions().maxrounds = max_rounds; }
   if (dual_postsolve) {
@@ -927,14 +905,21 @@ third_party_presolve_status_t third_party_presolve_t<i_t, f_t>::apply_papilo(
 
   // Capture original dimensions before papilo.apply() mutates papilo_problem
   // in place into its reduced form.
-  const i_t original_n_vars = static_cast<i_t>(papilo_problem.getNCols());
-  const i_t original_n_cons = static_cast<i_t>(papilo_problem.getNRows());
-  const i_t original_nnz    = static_cast<i_t>(papilo_problem.getConstraintMatrix().getNnz());
+  const i_t original_n_vars = papilo_problem.getNCols();
+  const i_t original_n_cons = papilo_problem.getNRows();
+  const i_t original_nnz    = papilo_problem.getConstraintMatrix().getNnz();
 
   CUOPT_LOG_DEBUG("Original problem: %d constraints, %d variables, %d nonzeros",
                   original_n_cons,
                   original_n_vars,
                   original_nnz);
+
+  if (category == problem_category_t::MIP && indicator_strengthening_ &&
+      (!reduction_allowlist_.has_value() ||
+       reduction_allowlist_->count("indicatorstrengthening") > 0)) {
+    strengthen_indicators<i_t, f_t>(papilo_problem);
+  }
+
   CUOPT_LOG_INFO("\nRunning Papilo presolve (git hash %s)", PAPILO_GITHASH);
   if (category == problem_category_t::MIP) { dual_postsolve = false; }
   papilo::Presolve<f_t> papilo_presolver;
@@ -947,6 +932,7 @@ third_party_presolve_status_t third_party_presolve_t<i_t, f_t>::apply_papilo(
                                  dual_postsolve,
                                  num_cpu_threads,
                                  max_rounds);
+  if (!dual_reductions_) { papilo_presolver.getPresolveOptions().dualreds = 0; }
   set_presolve_parameters(papilo_presolver,
                           category,
                           original_n_cons,
@@ -1410,6 +1396,55 @@ void third_party_presolve_t<i_t, f_t>::uncrush_primal_solution(
   auto status = post_solver.undo(reduced_sol, full_sol, *papilo_post_solve_storage_, is_optimal);
   if (check_postsolve) check_postsolve_status(status);
   full_primal = std::move(full_sol.primal);
+}
+
+template <typename i_t, typename f_t>
+bool third_party_presolve_t<i_t, f_t>::is_original_primal_solution_feasible(
+  const std::vector<f_t>& original_primal,
+  f_t absolute_tolerance,
+  f_t relative_tolerance,
+  f_t integrality_tolerance) const
+{
+  cuopt_assert(papilo_post_solve_storage_ != nullptr, "No postsolve storage available");
+  const auto& problem = papilo_post_solve_storage_->getOriginalProblem();
+  if (original_primal.size() != static_cast<size_t>(problem.getNCols())) { return false; }
+
+  const auto& col_flags = problem.getColFlags();
+  const auto& lower     = problem.getLowerBounds();
+  const auto& upper     = problem.getUpperBounds();
+  for (i_t col = 0; col < problem.getNCols(); ++col) {
+    const f_t value = original_primal[col];
+    if (!std::isfinite(value) ||
+        (!col_flags[col].test(papilo::ColFlag::kLbInf) &&
+         value < lower[col] - integrality_tolerance) ||
+        (!col_flags[col].test(papilo::ColFlag::kUbInf) &&
+         value > upper[col] + integrality_tolerance) ||
+        (col_flags[col].test(papilo::ColFlag::kIntegral) &&
+         std::abs(value - std::round(value)) > integrality_tolerance)) {
+      return false;
+    }
+  }
+
+  const auto& matrix    = problem.getConstraintMatrix();
+  const auto& row_flags = problem.getRowFlags();
+  const f_t inf         = std::numeric_limits<f_t>::infinity();
+  for (i_t row = 0; row < problem.getNRows(); ++row) {
+    const auto coefficients = matrix.getRowCoefficients(row);
+    const f_t activity      = compensated_dot2_csr(coefficients.getValues(),
+                                              coefficients.getIndices(),
+                                              original_primal.data(),
+                                              coefficients.getLength());
+    const f_t lb =
+      row_flags[row].test(papilo::RowFlag::kLhsInf) ? -inf : matrix.getLeftHandSides()[row];
+    const f_t ub =
+      row_flags[row].test(papilo::RowFlag::kRhsInf) ? inf : matrix.getRightHandSides()[row];
+    const f_t tolerance =
+      get_cstr_tolerance<i_t, f_t>(lb, ub, absolute_tolerance, relative_tolerance);
+    if (!std::isfinite(activity) || activity < lb - tolerance || activity > ub + tolerance) {
+      return false;
+    }
+  }
+  return true;
 }
 
 template <typename i_t, typename f_t>

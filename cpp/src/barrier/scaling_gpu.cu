@@ -18,11 +18,12 @@
 
 #include <barrier/device_sparse_matrix.cuh>
 #include <utilities/copy_helpers.hpp>
-#include <utilities/reduce_ops.cuh>
 
 #include <raft/util/cuda_utils.cuh>
 
-#include <cub/cub.cuh>
+#include <cuda/stream>
+
+#include <cub/device/device_segmented_reduce.cuh>
 
 #include <thrust/fill.h>
 #include <thrust/for_each.h>
@@ -36,13 +37,16 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace cuopt::mathematical_optimization::simplex {
 
 namespace {
 
+using cuopt::mathematical_optimization::barrier::device_csc_matrix_ptr_t;
 using cuopt::mathematical_optimization::barrier::device_csc_matrix_t;
 using cuopt::mathematical_optimization::barrier::device_csr_matrix_t;
+using cuopt::mathematical_optimization::barrier::make_device_csc_matrix;
 
 // row_norm[i] = max_j |A(i,j)|, computed straight off CSC: A.i[p] is the row of nonzero p,
 // so the per-row maxima need no row-contiguous (CSR) copy of the matrix. Mirrors
@@ -50,7 +54,7 @@ using cuopt::mathematical_optimization::barrier::device_csr_matrix_t;
 template <typename i_t, typename f_t>
 void compute_row_inf_norms(const device_csc_matrix_t<i_t, f_t>& A,
                            rmm::device_uvector<f_t>& row_norm,
-                           rmm::cuda_stream_view stream)
+                           cuda::stream_ref stream)
 {
   row_norm.resize(A.m, stream);
   thrust::fill(rmm::exec_policy(stream), row_norm.begin(), row_norm.end(), f_t(0));
@@ -63,19 +67,19 @@ void compute_row_inf_norms(const device_csc_matrix_t<i_t, f_t>& A,
                      // inside myAtomicMax is usually skipped entirely. Collisions are rare
                      // anyway -- a CSC column cannot repeat a row, so consecutive threads
                      // within a column target distinct accumulators.
-                     if (a > rmax[row[p]]) { raft::myAtomicMax(rmax + row[p], a); }
+                     if (a > rmax[row[p]]) { raft::myAtomicMax(&rmax[row[p]], a); }
                    });
 }
 
 // max_i |transform(input[i])| over the whole array (single segment); used for the
 // one-shot imbalance-ratio heuristic, not the per-iteration row/column reduces.
 template <typename f_t, typename InputIt>
-f_t whole_array_abs_max(InputIt input, size_t n, rmm::cuda_stream_view stream)
+f_t whole_array_abs_max(InputIt input, size_t n, cuda::stream_ref stream)
 {
   if (n == 0) return f_t(0);
-  auto abs_it = thrust::make_transform_iterator(input, cuopt::abs_value_transform_t<f_t>{});
-  return thrust::reduce(
-    rmm::exec_policy(stream), abs_it, abs_it + n, f_t(0), cuopt::max_op_t<f_t>{});
+  auto abs_it = thrust::make_transform_iterator(
+    input, [] __device__(f_t value) -> f_t { return raft::abs(value); });
+  return thrust::reduce(rmm::exec_policy(stream), abs_it, abs_it + n, f_t(0), cuda::maximum<f_t>{});
 }
 
 // min_i (|transform(input[i])| > 0 ? |value| : sentinel) over the whole array, sentinel ==
@@ -83,7 +87,7 @@ f_t whole_array_abs_max(InputIt input, size_t n, rmm::cuda_stream_view stream)
 // "ignore exact zeros" min-norm loop (scaling.cpp:45-46,53-56) bit for bit, including the
 // degenerate all-zero case where the ratio check below reduces to `min_row_norm > 0`.
 template <typename f_t, typename InputIt>
-f_t whole_array_nonzero_abs_min(InputIt input, size_t n, rmm::cuda_stream_view stream)
+f_t whole_array_nonzero_abs_min(InputIt input, size_t n, cuda::stream_ref stream)
 {
   const f_t sentinel = std::numeric_limits<f_t>::max();
   if (n == 0) return sentinel;
@@ -91,11 +95,10 @@ f_t whole_array_nonzero_abs_min(InputIt input, size_t n, rmm::cuda_stream_view s
     const f_t abs_value = raft::abs(value);
     return abs_value > f_t(0) ? abs_value : sentinel;
   });
-  return thrust::reduce(
-    rmm::exec_policy(stream), nz_it, nz_it + n, sentinel, cuopt::min_op_t<f_t>{});
+  return thrust::reduce(rmm::exec_policy(stream), nz_it, nz_it + n, sentinel, cuda::minimum<f_t>{});
 }
 
-// max/min per-segment |value| via cub::DeviceSegmentedReduce over an arbitrary offsets
+// max per-segment |value| via cub::DeviceSegmentedReduce over an arbitrary offsets
 // pair (row_start for CSR, col_start for CSC); segments with no nonzeros reduce to 0.
 template <typename i_t, typename f_t, typename OffsetBeginIt, typename OffsetEndIt>
 void segmented_abs_max(const f_t* values,
@@ -103,33 +106,19 @@ void segmented_abs_max(const f_t* values,
                        OffsetEndIt end_offsets,
                        i_t num_segments,
                        f_t* out,
-                       rmm::device_buffer& temp_storage,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   if (num_segments == 0) return;
-  auto abs_it  = thrust::make_transform_iterator(values, cuopt::abs_value_transform_t<f_t>{});
-  size_t bytes = 0;
-  cub::DeviceSegmentedReduce::Reduce(nullptr,
-                                     bytes,
-                                     abs_it,
-                                     out,
-                                     num_segments,
-                                     begin_offsets,
-                                     end_offsets,
-                                     cuopt::max_op_t<f_t>{},
-                                     f_t(0),
-                                     stream);
-  temp_storage.resize(bytes, stream);
-  cub::DeviceSegmentedReduce::Reduce(temp_storage.data(),
-                                     bytes,
-                                     abs_it,
-                                     out,
-                                     num_segments,
-                                     begin_offsets,
-                                     end_offsets,
-                                     cuopt::max_op_t<f_t>{},
-                                     f_t(0),
-                                     stream);
+  auto abs_it = thrust::make_transform_iterator(
+    values, [] __device__(f_t value) -> f_t { return raft::abs(value); });
+  RAFT_CUDA_TRY(cub::DeviceSegmentedReduce::Reduce(abs_it,
+                                                   out,
+                                                   num_segments,
+                                                   begin_offsets,
+                                                   end_offsets,
+                                                   cuda::maximum<f_t>{},
+                                                   f_t(0),
+                                                   stream.get()));
 }
 
 }  // namespace
@@ -140,17 +129,16 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
                      lp_problem_t<i_t, f_t>& scaled,
                      std::vector<f_t>& column_scaling,
                      std::vector<f_t>& row_scaling,
-                     std::shared_ptr<device_csc_matrix_t<i_t, f_t>>& device_A,
-                     std::shared_ptr<device_csc_matrix_t<i_t, f_t>>& device_Q)
+                     device_csc_matrix_ptr_t<i_t, f_t>& device_A,
+                     device_csc_matrix_ptr_t<i_t, f_t>& device_Q)
 {
   scaled     = unscaled;
   i_t m      = scaled.num_rows;
   i_t n      = scaled.num_cols;
   bool has_q = unscaled.Q.n > 0;
 
-  rmm::cuda_stream_view stream = unscaled.handle_ptr->get_stream();
+  cuda::stream_ref stream = unscaled.handle_ptr->get_stream();
 
-  // Unconditional, so the early return below cannot leave a stale matrix in the caller's hands.
   device_A.reset();
   device_Q.reset();
   row_scaling.assign(m, 1.0);
@@ -161,7 +149,6 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
   device_csr_matrix_t<i_t, f_t> dQ(scaled.Q, stream);
 
   // --- One-shot imbalance heuristic (mirrors scaling.cpp:43-116) ---
-  rmm::device_buffer scratch;
   // Holds the raw row inf-norms, both for the heuristic here and in each Ruiz iteration
   // below, where it is then converted in place into that iteration's row scale factors.
   rmm::device_uvector<f_t> r(0, stream);
@@ -171,13 +158,8 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
   f_t row_norm_ratio = (min_row_norm > 0) ? max_row_norm / min_row_norm : f_t(1.0);
 
   rmm::device_uvector<f_t> col_max_full(n, stream);
-  segmented_abs_max<i_t, f_t>(dA.x.data(),
-                              dA.col_start.data(),
-                              dA.col_start.data() + 1,
-                              n,
-                              col_max_full.data(),
-                              scratch,
-                              stream);
+  segmented_abs_max<i_t, f_t>(
+    dA.x.data(), dA.col_start.data(), dA.col_start.data() + 1, n, col_max_full.data(), stream);
   f_t max_col_norm   = whole_array_abs_max<f_t>(col_max_full.data(), n, stream);
   f_t min_col_norm   = whole_array_nonzero_abs_min<f_t>(col_max_full.data(), n, stream);
   f_t col_norm_ratio = (min_col_norm > 0) ? max_col_norm / min_col_norm : f_t(1.0);
@@ -245,8 +227,114 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
   rmm::device_uvector<i_t> d_cone_col_offsets = cuopt::device_copy(cone_col_offsets_host, stream);
   rmm::device_uvector<i_t> d_col_cone_id      = cuopt::device_copy(col_cone_id_host, stream);
 
-  // --- Ruiz iteration loop (mirrors scaling.cpp:123-224) ---
+  // Bound-magnitude column pre-scaling
+  // Ruiz only balances coefficients, so variables whose bounds span many orders of magnitude
+  // still leave the interior-point diagonal D = z/x ill-conditioned. Scale each bounded column
+  // to O(1) first.
+  constexpr f_t finite_bound_limit = 1e20;
+  {
+    rmm::device_uvector<f_t> c0(n, stream);
+    thrust::fill(rmm::exec_policy(stream), c0.begin(), c0.end(), f_t(1));
+    // log of each linear column's bound magnitude, 0 where the column has no finite nonzero
+    // bound, so the geometric mean below averages only the columns actually being scaled.
+    rmm::device_uvector<f_t> log_mag(cone_start, stream);
+    rmm::device_uvector<i_t> has_bound(cone_start, stream);
+    thrust::for_each(rmm::exec_policy(stream),
+                     thrust::make_counting_iterator(i_t(0)),
+                     thrust::make_counting_iterator(cone_start),
+                     [lower     = d_lower.data(),
+                      upper     = d_upper.data(),
+                      c0        = c0.data(),
+                      log_mag   = log_mag.data(),
+                      has_bound = has_bound.data(),
+                      finite_bound_limit] __device__(i_t j) {
+                       const f_t lo            = raft::abs(lower[j]);
+                       const f_t hi            = raft::abs(upper[j]);
+                       const bool finite_lower = lower[j] > -finite_bound_limit && lo > f_t(0);
+                       const bool finite_upper = upper[j] < finite_bound_limit && hi > f_t(0);
+                       f_t mag;
+                       if (finite_lower && finite_upper) {
+                         mag = std::sqrt(lo * hi);
+                       } else if (finite_lower) {
+                         mag = lo;
+                       } else if (finite_upper) {
+                         mag = hi;
+                       } else {
+                         // free / one-sided-zero: leave at scale 1
+                         log_mag[j]   = f_t(0);
+                         has_bound[j] = 0;
+                         return;
+                       }
+                       c0[j]        = mag;
+                       log_mag[j]   = std::log(mag);
+                       has_bound[j] = 1;
+                     });
+    const f_t geo_sum =
+      thrust::reduce(rmm::exec_policy(stream), log_mag.begin(), log_mag.end(), f_t(0));
+    const i_t geo_count =
+      thrust::reduce(rmm::exec_policy(stream), has_bound.begin(), has_bound.end(), i_t(0));
+    if (geo_count > 0) {
+      // Normalize so the average column scale is 1, keeping the overall problem magnitude
+      // centered rather than uniformly shrinking it.
+      const f_t geo_mean = std::exp(geo_sum / static_cast<f_t>(geo_count));
+      thrust::for_each(rmm::exec_policy(stream),
+                       thrust::make_counting_iterator(i_t(0)),
+                       thrust::make_counting_iterator(cone_start),
+                       [c0 = c0.data(), has_bound = has_bound.data(), geo_mean] __device__(i_t j) {
+                         if (has_bound[j]) c0[j] /= geo_mean;
+                       });
+      // Apply x_j = c0[j] * x'_j : A(:,j) *= c0[j], obj[j] *= c0[j], bounds /= c0[j],
+      // Q(i,j) *= c0[i]*c0[j], accumulate into col_scale.
+      thrust::for_each(rmm::exec_policy(stream),
+                       thrust::make_counting_iterator(i_t(0)),
+                       thrust::make_counting_iterator(dA.nz_max),
+                       [x = dA.x.data(), col = dA.col_index.data(), c0 = c0.data()] __device__(
+                         i_t p) { x[p] *= c0[col[p]]; });
+      thrust::transform(rmm::exec_policy(stream),
+                        d_objective.data(),
+                        d_objective.data() + n,
+                        c0.data(),
+                        d_objective.data(),
+                        cuda::std::multiplies<f_t>{});
+      thrust::transform(rmm::exec_policy(stream),
+                        d_col_scale.data(),
+                        d_col_scale.data() + n,
+                        c0.data(),
+                        d_col_scale.data(),
+                        cuda::std::multiplies<f_t>{});
+      thrust::for_each(rmm::exec_policy(stream),
+                       thrust::make_counting_iterator(i_t(0)),
+                       thrust::make_counting_iterator(n),
+                       [lower = d_lower.data(),
+                        upper = d_upper.data(),
+                        c0    = c0.data(),
+                        finite_bound_limit] __device__(i_t j) {
+                         if (lower[j] > -finite_bound_limit) lower[j] /= c0[j];
+                         if (upper[j] < finite_bound_limit) upper[j] /= c0[j];
+                       });
+      if (has_q) {
+        // Row-parallel for the same reason as the Ruiz loop below: Q has an empty row for
+        // every variable with no quadratic term.
+        thrust::for_each(
+          rmm::exec_policy(stream),
+          thrust::make_counting_iterator(i_t(0)),
+          thrust::make_counting_iterator(dQ.m),
+          [x = dQ.x.data(), rs = dQ.row_start.data(), col = dQ.j.data(), c0 = c0.data()] __device__(
+            i_t i) {
+            for (i_t p = rs[i]; p < rs[i + 1]; ++p) {
+              x[p] *= c0[i] * c0[col[p]];
+            }
+          });
+      }
+      // A changed, so refresh the row norms the first Ruiz pass reuses.
+      compute_row_inf_norms(dA, r, stream);
+    }
+  }
+
+  // Ruiz iteration loop
   constexpr i_t max_ruiz_iterations = 10;
+  // Stop once every row and column inf-norm is within the convergence tolerance of 1.
+  constexpr f_t ruiz_convergence_tol = 0.1;
   rmm::device_uvector<f_t> c(n, stream);
   rmm::device_uvector<f_t> col_max_linear(cone_start, stream);
   rmm::device_uvector<f_t> qrow_max_linear(has_q ? cone_start : 0, stream);
@@ -256,8 +344,8 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
     f_t max_deviation = 0.0;
 
     // --- Row scaling: r[i] = 1/sqrt(max_j |A(i,j)|) ---
-    // On the first pass r still holds the row inf-norms computed for the skip heuristic
-    // above, and A has not been touched since, so only recompute once A has been scaled.
+    // On entry r already holds the row inf-norms of the current A (computed above), so
+    // only recompute once this loop has scaled A.
     if (iter > 0) { compute_row_inf_norms(dA, r, stream); }
     max_deviation = std::max(
       max_deviation,
@@ -296,7 +384,6 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
                                   dA.col_start.data() + 1,
                                   cone_start,
                                   col_max_linear.data(),
-                                  scratch,
                                   stream);
       if (has_q) {
         segmented_abs_max<i_t, f_t>(dQ.x.data(),
@@ -304,14 +391,13 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
                                     dQ.row_start.data() + 1,
                                     cone_start,
                                     qrow_max_linear.data(),
-                                    scratch,
                                     stream);
         thrust::transform(rmm::exec_policy(stream),
                           col_max_linear.data(),
                           col_max_linear.data() + cone_start,
                           qrow_max_linear.data(),
                           col_max_linear.data(),
-                          cuopt::max_op_t<f_t>{});
+                          cuda::maximum<f_t>{});
       }
       max_deviation =
         std::max(max_deviation,
@@ -332,7 +418,7 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
       auto end_it =
         thrust::make_permutation_iterator(dA.col_start.data(), d_cone_col_offsets.data() + 1);
       segmented_abs_max<i_t, f_t>(
-        dA.x.data(), begin_it, end_it, num_cones, cone_max.data(), scratch, stream);
+        dA.x.data(), begin_it, end_it, num_cones, cone_max.data(), stream);
       max_deviation =
         std::max(max_deviation,
                  whole_array_abs_max<f_t>(
@@ -374,9 +460,10 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
       rmm::exec_policy(stream),
       thrust::make_counting_iterator(i_t(0)),
       thrust::make_counting_iterator(n),
-      [lower = d_lower.data(), upper = d_upper.data(), c = c.data()] __device__(i_t j) {
-        if (lower[j] > f_t(-1e20)) lower[j] /= c[j];
-        if (upper[j] < f_t(1e20)) upper[j] /= c[j];
+      [lower = d_lower.data(), upper = d_upper.data(), c = c.data(), finite_bound_limit] __device__(
+        i_t j) {
+        if (lower[j] > -finite_bound_limit) lower[j] /= c[j];
+        if (upper[j] < finite_bound_limit) upper[j] /= c[j];
       });
     if (has_q) {
       // Row-parallel so the row index comes from the iteration variable, as in scaling.cpp.
@@ -394,10 +481,10 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
         });
     }
 
-    if (max_deviation < 0.1) break;
+    if (max_deviation < ruiz_convergence_tol) break;
   }
 
-  // --- Finalize: invert accumulated reciprocal scales (mirrors scaling.cpp:226-235) ---
+  // Invert accumulated reciprocal scales
   thrust::transform(rmm::exec_policy(stream),
                     d_col_scale.data(),
                     d_col_scale.data() + n,
@@ -414,22 +501,18 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
 
   // --- Download scaled problem and scale vectors back to host ---
   // SOCP goes straight to the barrier's augmented path, where no host code reads A's values, so
-  // A stays on device rather than being downloaded and immediately uploaded again. Ruiz rescales
-  // values but never changes the sparsity pattern, so scaled.A already carries the right
-  // col_start/i from the host copy above; only x differs, and clearing it keeps anyone from
-  // reading the stale unscaled values that would otherwise be left behind.
+  // A stays on device rather than being downloaded and immediately uploaded again.
   if (!unscaled.second_order_cone_dims.empty()) {
     scaled.A.x.clear();
     scaled.A.x.shrink_to_fit();
-    device_A = std::make_shared<device_csc_matrix_t<i_t, f_t>>(std::move(dA));
+    device_A = make_device_csc_matrix<i_t, f_t>(std::move(dA));
   } else {
     scaled.A = dA.to_host(stream);
   }
   scaled.Q = dQ.to_host(stream);
-  // Q stays on host as well, so this is purely so the barrier need not upload it again. Q is
-  // symmetric, so its CSR arrays are also its CSC arrays and the handover is a relabel.
+  // Symmetric Q: its CSR arrays are also its CSC arrays.
   if (dQ.nz_max > 0) {
-    auto dQ_csc       = std::make_shared<device_csc_matrix_t<i_t, f_t>>(stream);
+    auto dQ_csc       = make_device_csc_matrix<i_t, f_t>(stream);
     dQ_csc->m         = dQ.m;
     dQ_csc->n         = dQ.m;
     dQ_csc->nz_max    = dQ.nz_max;
@@ -451,14 +534,13 @@ i_t scaling_ruiz_gpu(const lp_problem_t<i_t, f_t>& unscaled,
 
 #ifdef DUAL_SIMPLEX_INSTANTIATE_DOUBLE
 
-template int scaling_ruiz_gpu<int, double>(
-  const lp_problem_t<int, double>& unscaled,
-  const simplex_solver_settings_t<int, double>& settings,
-  lp_problem_t<int, double>& scaled,
-  std::vector<double>& column_scaling,
-  std::vector<double>& row_scaling,
-  std::shared_ptr<device_csc_matrix_t<int, double>>& device_A,
-  std::shared_ptr<device_csc_matrix_t<int, double>>& device_Q);
+template int scaling_ruiz_gpu<int, double>(const lp_problem_t<int, double>& unscaled,
+                                           const simplex_solver_settings_t<int, double>& settings,
+                                           lp_problem_t<int, double>& scaled,
+                                           std::vector<double>& column_scaling,
+                                           std::vector<double>& row_scaling,
+                                           device_csc_matrix_ptr_t<int, double>& device_A,
+                                           device_csc_matrix_ptr_t<int, double>& device_Q);
 
 #endif
 

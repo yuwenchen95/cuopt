@@ -173,8 +173,8 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_ITERATION_LIMIT, &pdlp_settings.iteration_limit, 0, std::numeric_limits<i_t>::max(), std::numeric_limits<i_t>::max()},
     {CUOPT_NODE_LIMIT, &mip_settings.node_limit, 0, std::numeric_limits<i_t>::max(), std::numeric_limits<i_t>::max()},
     {CUOPT_PDLP_SOLVER_MODE, reinterpret_cast<int*>(&pdlp_settings.pdlp_solver_mode), CUOPT_PDLP_SOLVER_MODE_STABLE1, CUOPT_PDLP_SOLVER_MODE_STABLE3, CUOPT_PDLP_SOLVER_MODE_STABLE3},
-    {CUOPT_METHOD, reinterpret_cast<int*>(&pdlp_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_PRIMAL, CUOPT_METHOD_CONCURRENT},
-    {CUOPT_METHOD, reinterpret_cast<int*>(&mip_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_PRIMAL, CUOPT_METHOD_CONCURRENT},
+    {CUOPT_METHOD, reinterpret_cast<int*>(&pdlp_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_PRIMAL_SIMPLEX, CUOPT_METHOD_CONCURRENT},
+    {CUOPT_METHOD, reinterpret_cast<int*>(&mip_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_PRIMAL_SIMPLEX, CUOPT_METHOD_CONCURRENT},
     {CUOPT_CONCURRENT_NNZ_CUTOFF, &pdlp_settings.concurrent_nnz_cutoff, -1, std::numeric_limits<i_t>::max(), 50'000'000, "skip Barrier and dual simplex in concurrent solves at this reduced NNZ; -1 disables the cutoff"},
     {CUOPT_CONCURRENT_NNZ_CUTOFF, &mip_settings.concurrent_nnz_cutoff, -1, std::numeric_limits<i_t>::max(), 50'000'000, "skip Barrier and dual simplex in concurrent solves at this reduced NNZ; -1 disables the cutoff"},
     {CUOPT_NUM_CPU_THREADS, &mip_settings.num_cpu_threads, -1, std::numeric_limits<i_t>::max(), -1},
@@ -186,7 +186,7 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_DUAL_SIMPLEX_INITIAL_PERTURBATION, &pdlp_settings.initial_perturbation, -1, 1, -1},
     {CUOPT_DUAL_SIMPLEX_REMOVE_PERTURBATION, &pdlp_settings.remove_perturbation, -1, 1, -1},
     {CUOPT_PRIMAL_SIMPLEX_PRICING, &pdlp_settings.primal_pricing, 0, 1, 1},
-    {CUOPT_BARRIER_DUAL_INITIAL_POINT, reinterpret_cast<int*>(&pdlp_settings.barrier_initial_point), -1, 2, -1},
+    {CUOPT_BARRIER_DUAL_INITIAL_POINT, reinterpret_cast<int*>(&pdlp_settings.barrier_dual_initial_point), -1, 2, -1},
     {CUOPT_POSTSOLVE_INFO, &pdlp_settings.postsolve_info, -1, 1, -1},
     {CUOPT_MIP_CUT_PASSES, &mip_settings.max_cut_passes, -1, std::numeric_limits<i_t>::max(), 10},
     {CUOPT_MIP_MIXED_INTEGER_ROUNDING_CUTS, &mip_settings.mir_cuts, -1, 1, -1},
@@ -198,8 +198,12 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_MIP_IMPLIED_BOUND_CUTS, &mip_settings.implied_bound_cuts, -1, 1, -1},
     {CUOPT_MIP_STRONG_CHVATAL_GOMORY_CUTS, &mip_settings.strong_chvatal_gomory_cuts, -1, 1, -1},
     {CUOPT_MIP_REDUCED_COST_STRENGTHENING, &mip_settings.reduced_cost_strengthening, -1, std::numeric_limits<i_t>::max(), -1},
+    {CUOPT_MIP_DUAL_DEGENERATE_FEASIBILITY_PUMP, &mip_settings.dual_degenerate_feasibility_pump, -1, 1, -1},
+    {CUOPT_MIP_PRIMAL_DEGENERATE_PIVOTS, &mip_settings.primal_degenerate_pivots, -1, 1, -1},
+    {CUOPT_MIP_DUAL_DEGENERATE_PIVOTS, &mip_settings.dual_degenerate_pivots, -1, 2, -1},
     {CUOPT_MIP_RINS, &mip_settings.submip_params.rins, -1, 1, -1},
     {CUOPT_MIP_RENS, &mip_settings.submip_params.rens, -1, 1, -1},
+    {CUOPT_MIP_MUTATION, &mip_settings.submip_params.mutation, -1, 1, -1},
     {CUOPT_MIP_OBJECTIVE_STEP, &mip_settings.objective_step, 0, 1, 1},
     {CUOPT_NUM_GPUS, &pdlp_settings.num_gpus, -1, 72, 1},
     {CUOPT_NUM_GPUS, &mip_settings.num_gpus, -1, 72, 1},
@@ -239,7 +243,7 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_MIP_HYPER_SUBMIP_ITERATION_LIMIT_OFFSET, &mip_settings.submip_params.iteration_limit_offset, 0, std::numeric_limits<i_t>::max(), 10000, "base sub-MIP simplex-iteration limit for root heuristics"},
     {CUOPT_MIP_HYPER_SUBMIP_MAX_LEVEL, &mip_settings.submip_params.max_level, 0, std::numeric_limits<i_t>::max(), 10, "maximum sub-MIP recursion level"},
     {CUOPT_BARRIER_PRESOLVE_BOUND_FREE_VARIABLES, &pdlp_settings.barrier_presolve_bound_free_variables, -1, 1, -1, "Bound free variables during barrier presolve: -1 automatic (default behavior), 0 disabled, 1 enabled"},
-    {CUOPT_BARRIER_PRESOLVE_ELIMINATE_FREE_VARIABLES, &pdlp_settings.barrier_presolve_eliminate_free_variables, -1, 1, -1, "Eliminate zero-cost free variables by equality substitution in barrier presolve (QP/SOCP only): -1 automatic (on, off when reusing a barrier cache), 0 disabled, 1 enabled (forgoes barrier cache reuse)"},
+    {CUOPT_BARRIER_PRESOLVE_ELIMINATE_FREE_VARIABLES, &pdlp_settings.barrier_presolve_eliminate_free_variables, -1, 1, -1, "Eliminate zero-cost free variables by equality substitution in barrier presolve (QP/SOCP only): -1 automatic (on), 0 disabled, 1 enabled; always off with sequence_solve, since barrier cache reuse cannot replay it"},
     {CUOPT_BARRIER_ADAPTIVE_REGULARIZATION, &pdlp_settings.barrier_adaptive_regularization, -1, 1, -1, "Adaptive regularization for barrier method: -1 automatic (default behavior), 0 disabled, 1 enabled"},
     // QCQP (barrier) scaling hyper-parameter
     {CUOPT_QCQP_HYPER_RUIZ_EQUILIBRATION, &pdlp_settings.qcqp_ruiz_equilibration, -1, 1, -1, "Ruiz equilibration for QCQP barrier scaling: -1 automatic (row/column imbalance heuristic), 0 disabled, 1 enabled"},
@@ -248,6 +252,7 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_CUDSS_HYPER_HYBRID_EXECUTE_MODE, &pdlp_settings.cudss_hybrid_execute_mode, -1, 1, -1, "cuDSS hybrid execute mode (run parts of factorization/solve on the host): -1 unset (cuDSS default, off), 0 off, 1 on"},
     {CUOPT_CUDSS_HYPER_HOST_NTHREADS, &pdlp_settings.cudss_host_nthreads, -1, std::numeric_limits<i_t>::max(), -1, "host threads for multi-threaded cuDSS: -1 unset (threading layer maximum, i.e. OMP_NUM_THREADS), else explicit count"},
     {CUOPT_CUDSS_HYPER_MATRIX_VIEW, &pdlp_settings.cudss_matrix_view, 0, 2, 0, "part of the symmetric KKT matrix cuDSS reads: 0 full, 1 upper triangle, 2 lower triangle"},
+    {CUOPT_BARRIER_HYPER_GPU_RUIZ_NNZ_THRESHOLD, &pdlp_settings.gpu_ruiz_nnz_threshold, 0, std::numeric_limits<i_t>::max(), 500000, "nnz(A)+nnz(Q) at or above which barrier Ruiz equilibration runs on GPU instead of CPU"},
   };
 
     // Bool parameters
@@ -272,6 +277,7 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     // Recursive sub-MIP (RINS) hyper-parameters (hidden from default --help: name contains "hyper_")
     {CUOPT_MIP_HYPER_SUBMIP_ENABLE_CPUFJ, &mip_settings.submip_params.enable_cpufj, true, "run CPU FJ over the sub-MIP"},
     {CUOPT_MIP_HYPER_BLOCK_BVE, &mip_settings.block_bve, true, "eliminate blocks of binaries in cuOpt's MIP presolve (needs " CUOPT_MIP_PROBING ")"},
+    {CUOPT_MIP_HYPER_PRESOLVE_INDICATOR_STRENGTHENING, &mip_settings.indicator_strengthening, true, "append implied indicator rows and lift capacity rows before Papilo presolve"},
     // PDLP scaling hyper-parameter (hidden from default --help: name contains "hyper_")
     {CUOPT_PDLP_HYPER_ENABLE_CURTIS_REID_SCALING, &pdlp_settings.hyper_params.do_curtis_reid_scaling, true, "Curtis-Reid prescaling, run before Ruiz/Pock-Chambolle scaling"},
   };

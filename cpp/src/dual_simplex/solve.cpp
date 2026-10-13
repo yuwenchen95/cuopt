@@ -70,11 +70,10 @@ void unscale_uncrush_barrier_to_user(const user_problem_t<i_t, f_t>& user_proble
                              unscaled_y,
                              unscaled_z);
 
-  // Dummy converted LP: sizes only. Bound-free=0 so uncrush_solution never reads A.
-  // cone_var_start is the exception: uncrush_primal_solution needs the real value to undo the
-  // shift convert applied to the cone block.
-  lp_problem_t<i_t, f_t> converted(handle_ptr, original_num_rows, original_num_cols, 0);
-  converted.cone_var_start = converted_cone_var_start;
+  // Dummy converted LP. Bound-free=0 so uncrush_solution never reads A. cone_var_start undoes
+  // the shift convert applied to the cone block.
+  lp_problem_t<i_t, f_t> converted(
+    handle_ptr, original_num_rows, original_num_cols, 0, converted_cone_var_start);
   lp_solution_t<i_t, f_t> lp_solution(original_num_rows, original_num_cols);
   uncrush_solution(presolve_info,
                    barrier_settings,
@@ -99,18 +98,18 @@ void unscale_uncrush_barrier_to_user(const user_problem_t<i_t, f_t>& user_proble
 
 // Presolve and scaling offset the data by a constant the maps alone cannot recover, so record
 // what the barrier values are worth beyond crush(user values); updates re-add it.
-template <typename f_t>
-std::vector<double> shift_from(const std::vector<f_t>& barrier_values,
-                               const std::vector<double>& crushed)
+// Returns 0 and writes shift, or -1 when the lengths disagree.
+template <typename i_t, typename f_t>
+i_t shift_from(const std::vector<f_t>& barrier_values,
+               const std::vector<f_t>& crushed,
+               std::vector<f_t>& shift)
 {
-  if (crushed.size() != barrier_values.size()) {
-    throw std::runtime_error("crushed length disagrees with the cached barrier LP");
-  }
-  std::vector<double> shift(barrier_values.size());
+  if (crushed.size() != barrier_values.size()) { return -1; }
+  shift.resize(barrier_values.size());
   for (std::size_t k = 0; k < shift.size(); ++k) {
-    shift[k] = static_cast<double>(barrier_values[k]) - crushed[k];
+    shift[k] = barrier_values[k] - crushed[k];
   }
-  return shift;
+  return 0;
 }
 
 template <typename i_t, typename f_t>
@@ -458,10 +457,13 @@ lp_status_t solve_linear_program_with_advanced_basis(
                                                work_estimate,
                                                work_unit_context);
     }
-    if (settings.inside_mip == 1 && settings.concurrent_halt != nullptr) {
+
+    if (settings.inside_submip != 1 && settings.inside_mip == 1 &&
+        settings.concurrent_halt != nullptr) {
       settings.log.debug("Setting concurrent halt to 1 inside_mip\n");
       *settings.concurrent_halt = 1;
     }
+
     if (status == dual_status_t::OPTIMAL) {
       std::vector<f_t> unscaled_x(lp.num_cols);
       std::vector<f_t> unscaled_y(lp.num_rows);
@@ -523,24 +525,30 @@ lp_status_t solve_linear_program_with_barrier(
   const simplex_solver_settings_t<i_t, f_t>& settings,
   f_t start_time,
   lp_solution_t<i_t, f_t>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache,
+  cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache,
   const raft::handle_t* handle_ptr)
 {
   raft::common::nvtx::range fun_scope("Barrier: solve_linear_program_with_barrier");
   lp_status_t status                                   = lp_status_t::UNSET;
   simplex_solver_settings_t<i_t, f_t> barrier_settings = settings;
 
-  auto const* xf = (cache != nullptr && cache->dirty()) ? cache->transform() : nullptr;
+  auto const* xf          = (cache != nullptr && cache->dirty()) ? cache->transform() : nullptr;
+  const bool user_has_soc = !user_problem.second_order_cone_dims.empty();
+  // run_barrier already resolved -1 to 0. can_reuse_barrier_cache also rejects a cache whose
+  // presolve bounded free variables, which this path cannot replay.
   const bool reuse_cached_data =
-    xf != nullptr && xf->barrier_lp != nullptr &&
-    // Only quadratic-objective and cone models reach the barrier at all.
-    (!user_problem.Q_values.empty() || !user_problem.second_order_cone_dims.empty()) &&
-    cuopt::mathematical_optimization::cone_layout_matches(*xf, user_problem) &&
-    // run_barrier already resolved -1 to 0. The second check covers caches built by an earlier
-    // solve that did bound free variables, whose presolve state the reuse path cannot replay.
-    settings.barrier_presolve_bound_free_variables == 0 &&
-    xf->presolve_info.bounded_free_variables.empty() &&
-    user_problem.num_cols == xf->user_num_cols && user_problem.num_rows == xf->user_num_rows;
+    cuopt::mathematical_optimization::can_reuse_barrier_cache(
+      xf,
+      settings.barrier_presolve_bound_free_variables,
+      user_problem.num_cols,
+      user_problem.num_rows,
+      !user_problem.Q_values.empty(),
+      user_has_soc) &&
+    // Cone reuse also requires the expanded layout and dimensions to match. These checks stay
+    // here because the other caller of can_reuse_barrier_cache sees the pre-expansion problem.
+    (xf != nullptr && cuopt::mathematical_optimization::cone_layout_matches(*xf, user_problem)) &&
+    (!user_has_soc ||
+     (user_problem.num_cols == xf->user_num_cols && user_problem.num_rows == xf->user_num_rows));
 
   if (reuse_cached_data) {
     if (cache->rhs_infeasible()) {
@@ -591,13 +599,6 @@ lp_status_t solve_linear_program_with_barrier(
   // Presolve the linear program
   presolve_info_t<i_t, f_t> presolve_info;
   lp_problem_t<i_t, f_t> presolved_lp(handle_ptr, 1, 1, 1);
-  // Free-variable elimination only removes variables with zero cost and folds rows together,
-  // and the cache's objective/RHS maps do not replay it. A later update could also give an
-  // eliminated variable a cost, so automatic keeps it off when the solve feeds a barrier cache.
-  // An explicit 1 is honored and forgoes cache reuse.
-  if (cache != nullptr && barrier_settings.barrier_presolve_eliminate_free_variables < 0) {
-    barrier_settings.barrier_presolve_eliminate_free_variables = 0;
-  }
   i_t ok;
   {
     raft::common::nvtx::range scope("Barrier: presolve");
@@ -615,8 +616,8 @@ lp_status_t solve_linear_program_with_barrier(
   std::vector<f_t> column_scales;
   std::vector<f_t> row_scales;
   // Scaled A/Q that the GPU scaling may leave on device for the barrier to adopt; null otherwise.
-  std::shared_ptr<barrier::device_csc_matrix_t<i_t, f_t>> device_A;
-  std::shared_ptr<barrier::device_csc_matrix_t<i_t, f_t>> device_Q;
+  barrier::device_csc_matrix_ptr_t<i_t, f_t> device_A;
+  barrier::device_csc_matrix_ptr_t<i_t, f_t> device_Q;
   {
     raft::common::nvtx::range scope("Barrier: scaling");
     const bool is_ruiz_candidate =
@@ -638,9 +639,9 @@ lp_status_t solve_linear_program_with_barrier(
   lp_problem_t<i_t, f_t> const* solver_lp = &barrier_lp;
   if (cache != nullptr) {
     cache->clear();
-    auto xf           = std::make_unique<cuopt::mathematical_optimization::barrier_transform_t>();
-    xf->user_num_cols = user_problem.num_cols;
-    xf->user_num_rows = user_problem.num_rows;
+    auto xf = std::make_unique<cuopt::mathematical_optimization::barrier_transform_t<i_t, f_t>>();
+    xf->user_num_cols                = user_problem.num_cols;
+    xf->user_num_rows                = user_problem.num_rows;
     xf->original_num_cols            = original_lp.num_cols;
     xf->original_num_rows            = original_lp.num_rows;
     xf->obj_scale                    = user_problem.obj_scale;
@@ -652,23 +653,21 @@ lp_status_t solve_linear_program_with_barrier(
     xf->original_col_to_expanded_col = user_problem.original_col_to_expanded_col;
     xf->pre_expansion_num_rows       = user_problem.original_num_rows;
     xf->converted_cone_var_start     = original_lp.cone_var_start;
-    xf->cone_head_bounds = cuopt::mathematical_optimization::record_cone_head_bounds(user_problem);
-    // Rows the expansion appended past the model's own; none when no expansion ran.
-    if (user_problem.original_num_rows > 0) {
+    xf->cone_head_bounds             = user_problem.cone_head_bounds;
+    // Append the expanded rhs.
+    if (!user_problem.original_col_to_expanded_col.empty()) {
       xf->cone_row_rhs.assign(user_problem.rhs.begin() + user_problem.original_num_rows,
                               user_problem.rhs.end());
     }
     xf->presolve_info = presolve_info;
     xf->column_scales = column_scales;
     xf->row_scales    = row_scales;
-    xf->primal_tol    = static_cast<double>(barrier_settings.primal_tol);
     // convert_range_rows zeroes rhs[i] onto the slack bounds and folding aggregates rows, so
     // neither leaves the user RHS in barrier_lp->rhs. Plain inequality/equality slacks do.
-    // Aliased cone variables hide which model variable a head stands for, so the head bounds
-    // cannot be re-proved against a new RHS.
-    xf->rhs_update_supported = user_problem.num_range_rows == 0 &&
-                               !presolve_info.folding_info.is_folded &&
-                               !user_problem.cone_variables_aliased;
+    // Alias rows (alias - x = 0) are appended after the original constraints and stay in the
+    // cached tail, so they do not block an update of the original RHS.
+    xf->rhs_update_supported =
+      user_problem.num_range_rows == 0 && !presolve_info.folding_info.is_folded;
     xf->barrier_lp = std::make_unique<lp_problem_t<i_t, f_t>>(barrier_lp);
     solver_lp      = xf->barrier_lp.get();
     cache->store_transform(std::move(xf));
@@ -701,23 +700,31 @@ lp_status_t solve_linear_program_with_barrier(
       // have dualized an LP, in which case the crush throws.
       // Both crushes take model coordinates. The expansion only appends rows, so the RHS prefix
       // is already model-sized, but it permutes columns, so gather the objective back.
-      auto const model_objective =
-        cuopt::mathematical_optimization::gather_model_objective(*xf, user_problem.objective);
-      const int model_m = cuopt::mathematical_optimization::model_num_rows(*xf);
+      bool objective_shift_ok = false;
       try {
+        auto const problem_objective =
+          cuopt::mathematical_optimization::gather_problem_objective<i_t>(*xf,
+                                                                          user_problem.objective);
         auto const crushed = cuopt::mathematical_optimization::crush_user_linear_objective(
-          *xf, model_objective.data(), static_cast<int>(model_objective.size()));
-        xf->linear_obj_shift = shift_from(solver_lp->objective, crushed);
+          *xf, problem_objective.data(), static_cast<i_t>(problem_objective.size()));
+        objective_shift_ok =
+          shift_from<i_t, f_t>(solver_lp->objective, crushed, xf->linear_obj_shift) == 0;
       } catch (std::exception const&) {
+        objective_shift_ok = false;
+      }
+      if (!objective_shift_ok) {
         // A zero shift still lets an update run; it just contributes nothing.
         xf->linear_obj_shift.assign(solver_lp->objective.size(), 0.0);
       }
       if (xf->rhs_update_supported) {
-        try {
-          auto const crushed =
-            cuopt::mathematical_optimization::crush_user_rhs(*xf, user_problem.rhs.data(), model_m);
-          xf->rhs_shift = shift_from(solver_lp->rhs, crushed);
-        } catch (std::exception const&) {
+        std::vector<f_t> crushed;
+        std::string error;
+        const i_t problem_m     = cuopt::mathematical_optimization::problem_num_rows(*xf);
+        bool const rhs_shift_ok = cuopt::mathematical_optimization::crush_user_rhs(
+                                    *xf, user_problem.rhs.data(), problem_m, crushed, error) ==
+                                    cuopt::mathematical_optimization::crush_rhs_status_t::success &&
+                                  shift_from<i_t, f_t>(solver_lp->rhs, crushed, xf->rhs_shift) == 0;
+        if (!rhs_shift_ok) {
           // Maps cannot reproduce this RHS, so refuse later updates.
           xf->rhs_update_supported = false;
           xf->rhs_shift.clear();
@@ -1017,7 +1024,7 @@ lp_status_t solve_linear_program_with_barrier(
   const user_problem_t<i_t, f_t>& user_problem,
   const simplex_solver_settings_t<i_t, f_t>& settings,
   lp_solution_t<i_t, f_t>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache)
+  cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache)
 {
   f_t start_time = tic();
   return solve_linear_program_with_barrier(
@@ -1030,7 +1037,7 @@ lp_status_t solve_linear_program_with_barrier(
   const simplex_solver_settings_t<i_t, f_t>& settings,
   f_t start_time,
   lp_solution_t<i_t, f_t>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache)
+  cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache)
 {
   return solve_linear_program_with_barrier(
     user_problem, settings, start_time, solution, cache, user_problem.handle_ptr);
@@ -1286,7 +1293,7 @@ template lp_status_t solve_linear_program_with_barrier(
   const user_problem_t<int, double>& user_problem,
   const simplex_solver_settings_t<int, double>& settings,
   lp_solution_t<int, double>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache);
+  cuopt::mathematical_optimization::barrier_cache_t<int, double>* cache);
 
 template lp_status_t solve_linear_program_with_primal(
   const user_problem_t<int, double>& user_problem,
@@ -1299,14 +1306,14 @@ template lp_status_t solve_linear_program_with_barrier(
   const simplex_solver_settings_t<int, double>& settings,
   double start_time,
   lp_solution_t<int, double>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache);
+  cuopt::mathematical_optimization::barrier_cache_t<int, double>* cache);
 
 template lp_status_t solve_linear_program_with_barrier(
   const user_problem_t<int, double>& user_problem,
   const simplex_solver_settings_t<int, double>& settings,
   double start_time,
   lp_solution_t<int, double>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache,
+  cuopt::mathematical_optimization::barrier_cache_t<int, double>* cache,
   const raft::handle_t* handle_ptr);
 
 template lp_status_t solve_linear_program(const user_problem_t<int, double>& user_problem,

@@ -21,6 +21,8 @@
 #include <raft/core/cusparse_macros.hpp>
 #include <raft/sparse/linalg/transpose.cuh>
 
+#include <cuda/stream>
+
 #include <dlfcn.h>
 
 #include <utility>
@@ -120,7 +122,7 @@ void my_cusparsespmv_preprocess(cusparseHandle_t handle,
 // Reads back only the three offsets the check needs.
 template <typename i_t>
 static bool alg2_beta_bug_possible(const rmm::device_uvector<i_t>& row_start,
-                                   rmm::cuda_stream_view stream)
+                                   cuda::stream_ref stream)
 {
   if (row_start.size() < 2) { return false; }
   const i_t first       = row_start.front_element(stream);
@@ -201,7 +203,7 @@ cusparse_view_t<i_t, f_t>::cusparse_view_t(raft::handle_t const* handle_ptr,
   // then derived from it on device instead of being converted on the host and uploaded again.
   device_csc_matrix_t<i_t, f_t> d_A(A, handle_ptr->get_stream());
   device_csr_matrix_t<i_t, f_t> d_A_csr(handle_ptr->get_stream());
-  d_A.to_compressed_row(d_A_csr, handle_ptr->get_stream());
+  d_A.to_compressed_row(d_A_csr, handle_ptr);
 
   const i_t rows = A.m;
   const i_t cols = A.n;
@@ -267,7 +269,6 @@ cusparse_view_t<i_t, f_t>::cusparse_view_t(raft::handle_t const* handle_ptr,
 }
 
 template <typename i_t, typename f_t>
-
 cusparse_view_t<i_t, f_t>::cusparse_view_t(raft::handle_t const* handle_ptr,
                                            device_csc_matrix_t<i_t, f_t>& A_csc,
                                            device_csc_matrix_t<i_t, f_t>& AT_csc)
@@ -306,7 +307,7 @@ cusparse_view_t<i_t, f_t>::cusparse_view_t(raft::handle_t const* handle_ptr,
   auto x = pdlp::make_dnvec<f_t>(d_x.size(), d_x.data());
   auto y = pdlp::make_dnvec<f_t>(d_y.size(), d_y.data());
 
-  beta_bug_possible_           = alg2_beta_bug_possible(AT_csc.col_start, handle_ptr_->get_stream());
+  beta_bug_possible_ = alg2_beta_bug_possible(AT_csc.col_start, handle_ptr_->get_stream());
   beta_bug_possible_transpose_ = alg2_beta_bug_possible(A_csc.col_start, handle_ptr_->get_stream());
   init_spmv_buffer_and_preprocess(A_.get(), x.get(), y.get(), spmv_buffer_, beta_bug_possible_);
   init_spmv_buffer_and_preprocess(

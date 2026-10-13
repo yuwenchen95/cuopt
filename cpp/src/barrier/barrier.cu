@@ -60,6 +60,9 @@
 #include <thrust/iterator/transform_output_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/reduce.h>
+#include <cub/device/device_reduce.cuh>
+#include <cub/device/device_select.cuh>
+#include <cub/device/device_transform.cuh>
 
 #include <cstdio>
 
@@ -70,6 +73,13 @@ using simplex::lp_problem_t;
 using simplex::lp_solution_t;
 using simplex::lp_status_t;
 using simplex::simplex_solver_settings_t;
+
+// Custom deleter for device_csc_matrix_t to handle CUDA memory management.
+template <typename i_t, typename f_t>
+void device_csc_matrix_deleter_t<i_t, f_t>::operator()(device_csc_matrix_t<i_t, f_t>* matrix) const
+{
+  delete matrix;
+}
 
 template <typename i_t, typename f_t>
 bool validate_barrier_cone_layout(const lp_problem_t<i_t, f_t>& problem,
@@ -436,7 +446,7 @@ class barrier_reduce_helper_t {
 
   rmm::device_uvector<f_t> d_results_;
   pinned_dense_vector_t<i_t, f_t> h_results_;
-  transform_reduce_helper_t<f_t> reductions_;
+  reduction_workspace_t<f_t> reductions_;
 };
 
 template <typename i_t, typename f_t>
@@ -444,7 +454,7 @@ class iteration_data_t {
  public:
   /** The device Q to factorize: adopted from the scaling when already there, uploaded otherwise. */
   static device_csc_matrix_t<i_t, f_t> make_device_Q(
-    std::shared_ptr<device_csc_matrix_t<i_t, f_t>> scaled_device_Q,
+    device_csc_matrix_ptr_t<i_t, f_t> scaled_device_Q,
     const lp_problem_t<i_t, f_t>& lp,
     const csc_matrix_t<i_t, f_t>& Qin,
     cuda::stream_ref stream)
@@ -478,8 +488,8 @@ class iteration_data_t {
                    const std::vector<i_t>& direct_free_variables,
                    const csc_matrix_t<i_t, f_t>& Qin,
                    const simplex_solver_settings_t<i_t, f_t>& settings,
-                   std::shared_ptr<device_csc_matrix_t<i_t, f_t>> scaled_device_A,
-                   std::shared_ptr<device_csc_matrix_t<i_t, f_t>> scaled_device_Q)
+                   device_csc_matrix_ptr_t<i_t, f_t> scaled_device_A,
+                   device_csc_matrix_ptr_t<i_t, f_t> scaled_device_Q)
     : upper_bounds(num_upper_bounds),
       c(lp.objective),
       b(lp.rhs),
@@ -530,9 +540,8 @@ class iteration_data_t {
                       : device_csc_matrix_t<i_t, f_t>(lp.A, lp.handle_ptr->get_stream())),
       device_Q_csc_(
         make_device_Q(std::move(scaled_device_Q), lp, Qin, lp.handle_ptr->get_stream())),
-      device_AT_csc_(typename device_csc_matrix_t<i_t, f_t>::transposed_t{},
-                     device_A_csc_,
-                     lp.handle_ptr->get_stream()),
+      device_AT_csc_(
+        typename device_csc_matrix_t<i_t, f_t>::transposed_t{}, device_A_csc_, lp.handle_ptr),
       d_original_A_values(0, lp.handle_ptr->get_stream()),
       d_inv_diag_prime(0, lp.handle_ptr->get_stream()),
       d_flag_buffer(0, lp.handle_ptr->get_stream()),
@@ -604,7 +613,7 @@ class iteration_data_t {
       d_Qx_(Qin.m, lp.handle_ptr->get_stream()),
       restrict_u_(0),
       d_restrict_u_(0, lp.handle_ptr->get_stream()),
-      transform_reduce_helper_(lp.handle_ptr->get_stream()),
+      reduction_workspace_(lp.handle_ptr->get_stream()),
       transform_reduce_pair_helper_(lp.handle_ptr->get_stream()),
       sum_reduce_helper_(lp.handle_ptr->get_stream()),
       reduce_helper_(lp.handle_ptr->get_stream()),
@@ -890,7 +899,7 @@ class iteration_data_t {
                    device_AD.x.data(),
                    device_AD.x.size(),
                    handle_ptr->get_stream());
-        device_AD.to_compressed_row(device_A, handle_ptr->get_stream());
+        device_AD.to_compressed_row(device_A, handle_ptr);
       } else {
         // AD == A, so device_AD is seeded straight from device_A_csc_, which also doubles as
         // form_adat's restore source, and device_AT_csc_ (already CSR(A)) serves as the SpGEMM's
@@ -921,7 +930,7 @@ class iteration_data_t {
         {
           raft::common::nvtx::range form_scope("Barrier: LP Data: form augmented");
           // Build the sparsity pattern of the augmented system
-          form_augmented(true);
+          form_augmented(augmented_form_t::build);
         }
         if (settings.concurrent_halt != nullptr && *settings.concurrent_halt == 1) { return; }
         symbolic_status = chol->analyze(device_augmented);
@@ -947,9 +956,10 @@ class iteration_data_t {
   }
 
   // Attach this solve's settings and rewind iterate-dependent state so barrier can
-  // start with the new c / b. A and Q are unchanged; the previous solve
-  // left D and the KKT values at its last iterate. Reuse is QP-only (no cones),
-  // so form_*(false) updates values in the existing CSR; no symbolic rebuild.
+  // start with the new c / b. A and Q are unchanged. The previous solve left D
+  // and the KKT values at its last iterate. reset_for_reuse (or form_adat(false)) rewrites
+  // values in the existing CSR. The cone block is put back to the initial diagonal a cold
+  // start factorizes; Nesterov-Todd scaling is recomputed from the new point.
   bool reset_iterate_state(const simplex_solver_settings_t<i_t, f_t>& settings)
   {
     if (chol == nullptr || symbolic_status != 0) { return false; }
@@ -987,7 +997,7 @@ class iteration_data_t {
     }
 
     if (use_augmented) {
-      form_augmented(false);
+      form_augmented(augmented_form_t::reset_for_reuse);
     } else {
       form_adat(false);
     }
@@ -1065,7 +1075,12 @@ class iteration_data_t {
     return degree;
   }
 
-  void form_augmented(bool first_call = false)
+  // build: first call, device CSR and metadata.
+  // reset_for_reuse: values only; cone block back to the cold-start matrix.
+  // update: values only; cone block from the current Nesterov-Todd scaling.
+  enum class augmented_form_t { build, reset_for_reuse, update };
+
+  void form_augmented(augmented_form_t mode = augmented_form_t::update)
   {
     i_t n    = A.n;
     i_t m    = A.m;
@@ -1076,7 +1091,7 @@ class iteration_data_t {
     const i_t p            = augmented_expansion_count();
     i_t factorization_size = augmented_system_size(n, m);
 
-    if (first_call) {
+    if (mode == augmented_form_t::build) {
       raft::common::nvtx::range scope("Barrier: augmented: device CSR build");
 
       const size_t n_sparse_cone_entries =
@@ -1167,7 +1182,40 @@ class iteration_data_t {
                          });
       RAFT_CHECK_CUDA(handle_ptr->get_stream().get());
 
-      if (has_soc) {
+      if (has_soc && mode == augmented_form_t::reset_for_reuse) {
+        // Cold initial_point factorizes this diagonal, then the first Newton step
+        // rebuilds the Nesterov-Todd Hessian. Zero w and eta so a dense block
+        // scatter and the matrix-free product both see that same initial matrix.
+        auto stream = handle_ptr->get_stream();
+        thrust::fill(rmm::exec_policy(stream), cones().w.begin(), cones().w.end(), f_t(0));
+        thrust::fill(rmm::exec_policy(stream), cones().eta.begin(), cones().eta.end(), f_t(0));
+        if (cones().has_sparse_cones()) {
+          restore_initial_sparse_cone_block(cones(),
+                                            device_augmented.x,
+                                            cone_kkt_data_.sparse_Hs_diag,
+                                            cone_kkt_data_.sparse_hessian_diag,
+                                            cone_kkt_data_.sparse_hessian_Q,
+                                            cone_kkt_data_.sparse_exp_v_col,
+                                            cone_kkt_data_.sparse_exp_u_col,
+                                            cone_kkt_data_.sparse_exp_v_row,
+                                            cone_kkt_data_.sparse_exp_u_row,
+                                            cone_kkt_data_.sparse_expansion_D,
+                                            stream,
+                                            dual_perturb);
+          RAFT_CHECK_CUDA(stream.get());
+        }
+        if (cones().n_dense_cones() > 0) {
+          scatter_dense_hessian_into_augmented(cones(),
+                                               device_augmented.x,
+                                               cone_kkt_data_.cone_csr_indices,
+                                               cone_kkt_data_.cone_Q_values,
+                                               cone_kkt_data_.dense_block_offsets,
+                                               cone_kkt_data_.dense_cone_ids,
+                                               stream,
+                                               dual_perturb);
+          RAFT_CHECK_CUDA(stream.get());
+        }
+      } else if (has_soc) {
         if (cones().has_sparse_cones()) {
           scatter_sparse_hessian_into_augmented(cones(),
                                                 device_augmented.x,
@@ -2500,7 +2548,7 @@ class iteration_data_t {
   dense_vector_t<i_t, f_t> restrict_u_;
   rmm::device_uvector<f_t> d_restrict_u_;
 
-  transform_reduce_helper_t<f_t> transform_reduce_helper_;
+  reduction_workspace_t<f_t> reduction_workspace_;
   transform_reduce_pair_helper_t<f_t> transform_reduce_pair_helper_;
   sum_reduce_helper_t<f_t> sum_reduce_helper_;
 
@@ -2576,12 +2624,11 @@ void cholesky_debug_check(const iteration_data_t<i_t, f_t>& data,
 }
 
 template <typename i_t, typename f_t>
-barrier_solver_t<i_t, f_t>::barrier_solver_t(
-  const lp_problem_t<i_t, f_t>& lp,
-  const simplex::presolve_info_t<i_t, f_t>& presolve,
-  const simplex_solver_settings_t<i_t, f_t>& settings,
-  std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_A,
-  std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_Q)
+barrier_solver_t<i_t, f_t>::barrier_solver_t(const lp_problem_t<i_t, f_t>& lp,
+                                             const simplex::presolve_info_t<i_t, f_t>& presolve,
+                                             const simplex_solver_settings_t<i_t, f_t>& settings,
+                                             device_csc_matrix_ptr_t<i_t, f_t> device_A,
+                                             device_csc_matrix_ptr_t<i_t, f_t> device_Q)
   : lp(lp),
     settings(settings),
     presolve_info(presolve),
@@ -2618,11 +2665,11 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
   const bool use_augmented          = data.use_augmented;
   const bool has_direct_free_linear = data.n_direct_free_linear > 0;
 
-  const barrier_initial_point_t input_strategy = settings.barrier_initial_point;
+  const barrier_dual_initial_point_t input_strategy = settings.barrier_dual_initial_point;
 
-  const barrier_initial_point_t init_strategy =
-    (data.has_cones() && input_strategy == barrier_initial_point_t::Automatic)
-      ? barrier_initial_point_t::SedumiMu
+  const barrier_dual_initial_point_t init_strategy =
+    (data.has_cones() && input_strategy == barrier_dual_initial_point_t::Automatic)
+      ? barrier_dual_initial_point_t::SedumiMu
       : input_strategy;
 
   // SedumiMu: Sturm/SeDuMi-style mu-based primal+dual initial point.
@@ -2630,7 +2677,7 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
   // where e_K is the identity of the symmetric cone:
   //   LP block: e = 1,  SOC block: e = (sqrt(2), 0, ..., 0)
   // Full primal+dual point; no factorization/solve (main loop factorizes later).
-  if (init_strategy == barrier_initial_point_t::SedumiMu) {
+  if (init_strategy == barrier_dual_initial_point_t::SedumiMu) {
     const f_t norm_b     = vector_norm_inf<i_t, f_t>(lp.rhs);
     const f_t norm_c     = vector_norm_inf<i_t, f_t>(lp.objective);
     const f_t mu         = std::sqrt((1.0 + norm_b) * (1.0 + norm_c));
@@ -2819,8 +2866,8 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
   const bool has_soc   = data.has_cones();
   const i_t linear_end = has_soc ? data.cone_start() : lp.num_cols;
 
-  if (init_strategy == barrier_initial_point_t::Automatic ||
-      init_strategy == barrier_initial_point_t::LustigMarstenShanno) {
+  if (init_strategy == barrier_dual_initial_point_t::Automatic ||
+      init_strategy == barrier_dual_initial_point_t::LustigMarstenShanno) {
     // Use the dual starting point suggested by the paper
     // On Implementing Mehrotra’s Predictor–Corrector Interior-Point Method for Linear Programming
     // Irvin J. Lustig, Roy E. Marsten, and David F. Shanno
@@ -4003,7 +4050,7 @@ void barrier_solver_t<i_t, f_t>::compute_target_mu(
   raft::device_span<f_t> dx_aff_span(data.d_dx_aff_.data(), data.d_dx_aff_.size());
   raft::device_span<f_t> dz_aff_span(data.d_dz_aff_.data(), data.d_dz_aff_.size());
 
-  f_t complementarity_xz_aff_sum = data.transform_reduce_helper_.transform_reduce(
+  f_t complementarity_xz_aff_sum = data.reduction_workspace_.transform_reduce(
     thrust::make_counting_iterator<size_t>(0),
     cuda::std::plus<f_t>{},
     [step_primal_aff, step_dual_aff, x_span, z_span, dx_span, dz_span, dx_aff_span, dz_aff_span] HD(
@@ -4034,7 +4081,7 @@ void barrier_solver_t<i_t, f_t>::compute_target_mu(
   raft::device_span<f_t> dw_aff_span(data.d_dw_aff_.data(), data.d_dw_aff_.size());
   raft::device_span<f_t> dv_aff_span(data.d_dv_aff_.data(), data.d_dv_aff_.size());
 
-  f_t complementarity_wv_aff_sum = data.transform_reduce_helper_.transform_reduce(
+  f_t complementarity_wv_aff_sum = data.reduction_workspace_.transform_reduce(
     thrust::make_counting_iterator<size_t>(0),
     cuda::std::plus<f_t>{},
     [step_primal_aff, step_dual_aff, w_span, v_span, dw_span, dv_span, dw_aff_span, dv_aff_span] HD(
@@ -5040,7 +5087,7 @@ template <typename i_t, typename f_t>
 lp_status_t barrier_solver_t<i_t, f_t>::solve_with_cache(
   f_t start_time,
   lp_solution_t<i_t, f_t>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache)
+  cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache)
 {
   settings.log.printf("Barrier solver started at %.2f seconds\n", toc(start_time));
   try {
@@ -5097,7 +5144,7 @@ template <typename i_t, typename f_t>
 lp_status_t barrier_solver_t<i_t, f_t>::solve(
   f_t start_time,
   lp_solution_t<i_t, f_t>& solution,
-  cuopt::mathematical_optimization::barrier_cache_t* cache)
+  cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache)
 {
   settings.log.printf("Barrier solver started at %.2f seconds\n", toc(start_time));
   try {
@@ -5166,7 +5213,7 @@ lp_status_t barrier_solver_t<i_t, f_t>::solve(
 
 // Optimal: persist iteration_data_t on the cache. Otherwise drop it.
 template <typename i_t, typename f_t>
-lp_status_t store_or_clear_cache(cuopt::mathematical_optimization::barrier_cache_t* cache,
+lp_status_t store_or_clear_cache(cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache,
                                  std::unique_ptr<iteration_data_t<i_t, f_t>>& owned_data,
                                  lp_status_t status)
 {
@@ -5210,6 +5257,7 @@ void apply_barrier_rhs(iteration_data_t<int, double>& data, double const* barrie
 #ifdef DUAL_SIMPLEX_INSTANTIATE_DOUBLE
 template bool validate_barrier_cone_layout<int, double>(
   const lp_problem_t<int, double>& problem, const simplex_solver_settings_t<int, double>& settings);
+template struct device_csc_matrix_deleter_t<int, double>;
 template class barrier_solver_t<int, double>;
 template class sparse_cholesky_base_t<int, double>;
 template class sparse_cholesky_cudss_t<int, double>;

@@ -202,20 +202,21 @@ i_t scaling(const lp_problem_t<i_t, f_t>& unscaled,
             }
           }
         }
-        // The column pre-scaling changed A, so the row norms from the skip heuristic are stale.
+        // A changed, so refresh the row norms the first Ruiz pass reuses.
         compute_row_inf_norms(scaled.A, r);
       }
     }
 
     // Apply Ruiz equilibration
     constexpr i_t max_ruiz_iterations = 10;
+    // Stop once every row and column inf-norm is within the convergence tolerance of 1.
+    constexpr f_t ruiz_convergence_tol = 0.1;
     for (i_t iter = 0; iter < max_ruiz_iterations; ++iter) {
       f_t max_deviation = 0.0;
 
       // --- Row scaling: scale each row by 1/sqrt(max|a_ij|) ---
-      // On the first pass r already holds the row inf-norms of the current A (computed for the
-      // skip heuristic, or refreshed after the bound pre-scaling), so only recompute once A has
-      // been scaled.
+      // On entry r already holds the row inf-norms of the current A (computed above), so
+      // only recompute once this loop has scaled A.
       if (iter > 0) { compute_row_inf_norms(scaled.A, r); }
       for (i_t i = 0; i < m; ++i) {
         const f_t rm  = r[i];
@@ -297,7 +298,7 @@ i_t scaling(const lp_problem_t<i_t, f_t>& unscaled,
           }
         }
       }
-      if (max_deviation < 0.1) break;
+      if (max_deviation < ruiz_convergence_tol) break;
     }
 
     // Ruiz col_scale/row_scaling accumulate reciprocals (c[j] = 1/sqrt(norm)).

@@ -84,15 +84,17 @@
             "Concurrent",
             "PDLP",
             "DualSimplex",
-            "Barrier"
+            "Barrier",
+            "PrimalSimplex"
           ],
           "x-enum-values": {
             "Concurrent": 0,
             "PDLP": 1,
             "DualSimplex": 2,
-            "Barrier": 3
+            "Barrier": 3,
+            "PrimalSimplex": 4
           },
-          "description": "Method used to solve the LP. Concurrent runs PDLP, dual simplex and barrier in parallel. Default accuracy differs per method: PDLP 1e-4 relative, barrier 1e-8 relative, dual simplex 1e-6 absolute. Default: Concurrent."
+          "description": "Method used to solve the LP: Concurrent, PDLP, dual simplex, barrier, or primal simplex. Concurrent runs PDLP, dual simplex and barrier in parallel. Default accuracy differs per method: PDLP 1e-4 relative, barrier 1e-8 relative, dual simplex and primal simplex 1e-6 absolute. Default: Concurrent."
         },
         "presolver": {
           "type": "integer",
@@ -109,7 +111,7 @@
         },
         "num_gpus": {
           "type": "integer",
-          "description": "Number of GPUs used for the solve. Relevant to LP in concurrent mode (up to 2 GPUs), where PDLP and barrier run on separate GPUs rather than sharing one. For distributed PDLP, -1 selects all visible devices. Default: 1."
+          "description": "Number of GPUs used for the solve. Relevant to LP in concurrent mode (up to 2 GPUs), where PDLP and barrier run on separate GPUs rather than sharing one. For multi-GPU PDLP, -1 selects all visible devices. Default: 1."
         },
         "per_constraint_residual": {
           "type": "boolean",
@@ -135,9 +137,9 @@
           "type": "integer",
           "description": "Barrier: ordering algorithm cuDSS uses for sparse factorizations, which can significantly affect runtime. -1 automatic, 0 cuDSS default ordering, 1 AMD (approximate minimum degree). Default: -1 (automatic)."
         },
-        "barrier_initial_point": {
+        "barrier_dual_initial_point": {
           "type": "integer",
-          "description": "Barrier: how the initial point is computed, which affects the iteration count. -1 automatic, 0 the Lustig-Marsten-Shanno heuristic, 1 a least-squares problem minimizing the norms of the dual variables and reduced costs subject to the dual equality constraints, 2 the Sturm/SeDuMi-style mu-based primal+dual initial point. Default: -1 (automatic)."
+          "description": "Barrier: how the dual initial point is computed, which affects the iteration count. -1 automatic, 0 the Lustig-Marsten-Shanno heuristic, 1 a least-squares problem minimizing the norms of the dual variables and reduced costs subject to the dual equality constraints, 2 the Sturm/SeDuMi-style mu-based primal+dual initial point. Default: -1 (automatic)."
         },
         "eliminate_dense_columns": {
           "type": "boolean",
@@ -156,13 +158,17 @@
           "description": "Default: -1."
         },
         "barrier_iterative_refinement": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Barrier: iterative refinement applied to each KKT solve. 0 off, 1 GMRES, 2 fixed point, 3 automatic fixed point (switched on once the iterate nears convergence or a step makes insufficient progress), 4 automatic GMRES. Default: 1 (GMRES)."
         },
         "barrier_complementarity_tol": {
-          "type": "number"
+          "type": "number",
+          "description": "Barrier: relative complementarity tolerance for convergence (the \"Compl.\" column in the barrier iteration log). Default: 1e-8."
         },
         "cudss_nd_nlevels": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Barrier: METIS nested-dissection depth used by cuDSS reordering. -1 leaves the cuDSS default. Default: -1 (cuDSS default).",
+          "x-parameter-name": "cudss_hyper_nd_nlevels"
         },
         "save_best_primal_so_far": {
           "type": "boolean",
@@ -178,7 +184,8 @@
         },
         "do_curtis_reid_scaling": {
           "type": "boolean",
-          "description": "Whether Curtis-Reid prescaling runs before Ruiz/Pock-Chambolle matrix scaling. Default: true."
+          "description": "Whether Curtis-Reid prescaling runs before Ruiz/Pock-Chambolle matrix scaling. Default: true.",
+          "x-parameter-name": "pdlp_hyper_enable_curtis_reid_scaling"
         }
       },
       "additionalProperties": false

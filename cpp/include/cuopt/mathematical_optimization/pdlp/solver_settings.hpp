@@ -26,6 +26,7 @@
 namespace cuopt {
 namespace CUOPT_EXPORT mathematical_optimization {
 
+template <typename i_t, typename f_t>
 class barrier_cache_t;
 
 // Forward declare solver_settings_t for friend class
@@ -62,18 +63,18 @@ enum pdlp_solver_mode_t : int {
  * PDLP: Use the PDLP method.
  * DualSimplex: Use the dual simplex method.
  * Barrier: Use the barrier method
- * Primal: Use the (experimental) primal simplex method.
+ * PrimalSimplex: Use the primal simplex method.
  * Unset: The value was not set.
  *
  * @note Default method is Concurrent.
  */
 enum method_t : int {
-  Concurrent  = CUOPT_METHOD_CONCURRENT,
-  PDLP        = CUOPT_METHOD_PDLP,
-  DualSimplex = CUOPT_METHOD_DUAL_SIMPLEX,
-  Barrier     = CUOPT_METHOD_BARRIER,
-  Primal      = CUOPT_METHOD_PRIMAL,
-  Unset       = CUOPT_METHOD_UNSET
+  Concurrent    = CUOPT_METHOD_CONCURRENT,
+  PDLP          = CUOPT_METHOD_PDLP,
+  DualSimplex   = CUOPT_METHOD_DUAL_SIMPLEX,
+  Barrier       = CUOPT_METHOD_BARRIER,
+  PrimalSimplex = CUOPT_METHOD_PRIMAL_SIMPLEX,
+  Unset         = CUOPT_METHOD_UNSET
 };
 
 /// Returns the corresponding string from the enum `method_t`.
@@ -84,7 +85,7 @@ inline std::string method_to_string(method_t method)
     case method_t::PDLP: return "PDLP";
     case method_t::Barrier: return "Barrier";
     case method_t::Concurrent: return "Concurrent";
-    case method_t::Primal: return "Primal Simplex";
+    case method_t::PrimalSimplex: return "Primal Simplex";
     default: return "Unset";
   }
 }
@@ -310,7 +311,7 @@ class pdlp_solver_settings_t {
   i_t initial_perturbation{-1};
   i_t remove_perturbation{-1};
   i_t primal_pricing{1};
-  barrier_initial_point_t barrier_initial_point{barrier_initial_point_t::Automatic};
+  barrier_dual_initial_point_t barrier_dual_initial_point{barrier_dual_initial_point_t::Automatic};
   i_t postsolve_info{-1};
   i_t barrier_presolve_bound_free_variables{-1};  // -1 automatic, 0 disabled, 1 enabled
   // -1 automatic (on, off when the solve feeds a barrier cache), 0 disabled, 1 enabled
@@ -319,6 +320,9 @@ class pdlp_solver_settings_t {
   // imbalance heuristic), 0 disabled, 1 enabled. Distinct from PDLP's own Ruiz
   // scaling in pdlp_hyper_params_t.
   i_t qcqp_ruiz_equilibration{-1};
+  // nnz(A)+nnz(Q) at or above which the barrier path runs Ruiz equilibration on GPU instead
+  // of CPU. Below it the upload costs more than the scaling saves.
+  i_t gpu_ruiz_nnz_threshold{500000};
   // Margin used to push the barrier method's initial iterate into the interior of the
   // nonnegative orthant / SOC (values are shifted to be at least this far from the boundary).
   f_t barrier_initial_point_safeguard{10.0};
@@ -394,7 +398,7 @@ class pdlp_solver_settings_t {
   /** When true, the first GPU barrier/QCQP solve retains cache state for later reuse. */
   bool sequence_solve{false};
   /** Non-owning cache pointer set by ``call_solve`` for barrier cache reuse. */
-  barrier_cache_t* barrier_cache{nullptr};
+  barrier_cache_t<i_t, f_t>* barrier_cache{nullptr};
 
  private:
   /** Initial primal solution */

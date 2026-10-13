@@ -24,6 +24,7 @@
 #include <utility>
 
 namespace cuopt::mathematical_optimization {
+template <typename i_t, typename f_t>
 class barrier_cache_t;
 }
 
@@ -38,7 +39,24 @@ template <typename i_t, typename f_t>
 class iteration_data_t;  // Forward declare
 
 template <typename i_t, typename f_t>
-class device_csc_matrix_t;  // Forward declare
+class device_csc_matrix_t;
+
+// Custom deleter for device_csc_matrix_t to handle CUDA memory management.
+template <typename i_t, typename f_t>
+struct device_csc_matrix_deleter_t {
+  void operator()(device_csc_matrix_t<i_t, f_t>* matrix) const;
+};
+
+template <typename i_t, typename f_t>
+using device_csc_matrix_ptr_t =
+  std::unique_ptr<device_csc_matrix_t<i_t, f_t>, device_csc_matrix_deleter_t<i_t, f_t>>;
+
+template <typename i_t, typename f_t, typename... args_t>
+device_csc_matrix_ptr_t<i_t, f_t> make_device_csc_matrix(args_t&&... args)
+{
+  return device_csc_matrix_ptr_t<i_t, f_t>(
+    new device_csc_matrix_t<i_t, f_t>(std::forward<args_t>(args)...));
+}
 
 template <typename i_t, typename f_t>
 class barrier_solver_t {
@@ -50,17 +68,19 @@ class barrier_solver_t {
   barrier_solver_t(const simplex::lp_problem_t<i_t, f_t>& lp,
                    const simplex::presolve_info_t<i_t, f_t>& presolve,
                    const simplex::simplex_solver_settings_t<i_t, f_t>& settings,
-                   std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_A = nullptr,
-                   std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_Q = nullptr);
-  simplex::lp_status_t solve(f_t start_time,
-                             simplex::lp_solution_t<i_t, f_t>& solution,
-                             cuopt::mathematical_optimization::barrier_cache_t* cache = nullptr);
+                   device_csc_matrix_ptr_t<i_t, f_t> device_A = nullptr,
+                   device_csc_matrix_ptr_t<i_t, f_t> device_Q = nullptr);
+  simplex::lp_status_t solve(
+    f_t start_time,
+    simplex::lp_solution_t<i_t, f_t>& solution,
+    cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache = nullptr);
   // Cache reuse: cached iteration_data_t already has the updated linear objective.
   // Reset iterate state, compute a new initial point, run barrier. Same status/solution contract as
   // solve().
-  simplex::lp_status_t solve_with_cache(f_t start_time,
-                                        simplex::lp_solution_t<i_t, f_t>& solution,
-                                        cuopt::mathematical_optimization::barrier_cache_t* cache);
+  simplex::lp_status_t solve_with_cache(
+    f_t start_time,
+    simplex::lp_solution_t<i_t, f_t>& solution,
+    cuopt::mathematical_optimization::barrier_cache_t<i_t, f_t>* cache);
 
  private:
   simplex::lp_status_t barrier_advanced_solve(f_t start_time,
@@ -129,9 +149,8 @@ class barrier_solver_t {
   const simplex::simplex_solver_settings_t<i_t, f_t>& settings;
   const simplex::presolve_info_t<i_t, f_t>& presolve_info;
   cuda::stream_ref stream_view_;
-  // Handed over to iteration_data_t by solve(), which empties them.
-  std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_A_;
-  std::shared_ptr<device_csc_matrix_t<i_t, f_t>> device_Q_;
+  device_csc_matrix_ptr_t<i_t, f_t> device_A_;
+  device_csc_matrix_ptr_t<i_t, f_t> device_Q_;
 };
 
 }  // namespace cuopt::mathematical_optimization::barrier

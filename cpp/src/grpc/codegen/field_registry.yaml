@@ -190,6 +190,7 @@ enums:
     - PDLP
     - DualSimplex
     - Barrier
+    - PrimalSimplex
 
   variable_type:
     domain: problem
@@ -467,11 +468,16 @@ chunked_result_header:
 pdlp_settings:
   cpp_type: "pdlp_solver_settings_t<i_t, f_t>"
   proto_type: "cuopt::remote::PDLPSolverSettings"
-  # Typed fields that set_parameter() accepts stay on the wire for clients
-  # already published, but are deprecated. New parameters are not added here:
-  # they travel in `parameters` and the server applies them with
-  # set_parameter_from_string(), which wins over a deprecated field.
-  deprecate_parameters: true
+  # parameter_map deprecates every typed field that set_parameter() accepts.
+  # Those fields stay in the message so a server can still read a client that
+  # sends them. The current client writes set_parameter() values only in
+  # `parameters` and needs a server that applies that map. New parameters are
+  # not added here. All or nothing is a property of the serialized map, not of
+  # set_parameter() on the settings object. A non-empty map skips every
+  # deprecated typed field and applies only the keys it contains. An empty map
+  # is an older client, and those typed fields are applied. An old client that
+  # calls set_parameter() still sends an empty map unless its serializer writes
+  # one. Warm start is an embed and is always applied.
   parameter_map:
     name: parameters
     field_num: 60
@@ -617,9 +623,10 @@ pdlp_settings:
       optional: true
   - method:
       description: >-
-        Method used to solve the LP. Concurrent runs PDLP, dual simplex and
-        barrier in parallel. Default accuracy differs per method: PDLP 1e-4
-        relative, barrier 1e-8 relative, dual simplex 1e-6 absolute.
+        Method used to solve the LP: Concurrent, PDLP, dual simplex, barrier,
+        or primal simplex. Concurrent runs PDLP, dual simplex and barrier in
+        parallel. Default accuracy differs per method: PDLP 1e-4 relative,
+        barrier 1e-8 relative, dual simplex and primal simplex 1e-6 absolute.
       default: "Concurrent"
       field_num: 15
       type: lp_method
@@ -659,7 +666,7 @@ pdlp_settings:
       description: >-
         Number of GPUs used for the solve. Relevant to LP in concurrent mode
         (up to 2 GPUs), where PDLP and barrier run on separate GPUs rather than
-        sharing one. For distributed PDLP, -1 selects all visible devices.
+        sharing one. For multi-GPU PDLP, -1 selects all visible devices.
       default: "1"
       field_num: 19
       type: int32
@@ -714,9 +721,9 @@ pdlp_settings:
       field_num: 25
       type: int32
       optional: true
-  - barrier_initial_point:
+  - barrier_dual_initial_point:
       description: >-
-        Barrier: how the initial point is computed, which affects the
+        Barrier: how the dual initial point is computed, which affects the
         iteration count. -1 automatic, 0 the Lustig-Marsten-Shanno heuristic,
         1 a least-squares problem minimizing the norms of the dual variables
         and reduced costs subject to the dual equality constraints, 2 the
@@ -724,7 +731,7 @@ pdlp_settings:
       default: "-1 (automatic)"
       field_num: 26
       type: int32
-      from_proto_cast: "barrier_initial_point_t"
+      from_proto_cast: "barrier_dual_initial_point_t"
       optional: true
   - eliminate_dense_columns:
       description: >-
@@ -767,23 +774,38 @@ pdlp_settings:
       field_num: 33
       type: int32
       optional: true
-  # field_num 35-37 previously used by cudss_hybrid_mode/cudss_hybrid_execute_mode/
-  # cudss_host_nthreads, removed — do not reuse these numbers.
+  # field_num 36-37 previously held cuDSS hybrid/thread fields on portfolio_perf, removed —
+  # do not reuse. (35 also briefly did there; main now assigns it to do_curtis_reid_scaling.)
   # field_num 31 previously held `barrier_iterative_refinement` as a bool; that field
   # was retired and the name reused below (field_num 38) for the merged int method,
   # so the exposed parameter name is unchanged even though the wire field_num moved.
   # field_num 39 briefly held `barrier_adaptive_regularization` on portfolio_perf before
   # main assigned it 34; do not reuse.
   - barrier_iterative_refinement:
+      description: >-
+        Barrier: iterative refinement applied to each KKT solve. 0 off,
+        1 GMRES, 2 fixed point, 3 automatic fixed point (switched on once the
+        iterate nears convergence or a step makes insufficient progress),
+        4 automatic GMRES.
+      default: "1 (GMRES)"
       field_num: 38
       type: int32
       optional: true
   - barrier_complementarity_tol:
+      description: >-
+        Barrier: relative complementarity tolerance for convergence (the
+        "Compl." column in the barrier iteration log).
+      default: "1e-8"
       field_num: 40
       optional: true
   # cudss_nd_nlevels used field_num 34 on portfolio_perf, which collides with main's
   # barrier_adaptive_regularization; moved to 41.
   - cudss_nd_nlevels:
+      param_name: cudss_hyper_nd_nlevels
+      description: >-
+        Barrier: METIS nested-dissection depth used by cuDSS reordering.
+        -1 leaves the cuDSS default.
+      default: "-1 (cuDSS default)"
       field_num: 41
       type: int32
       optional: true
@@ -823,6 +845,7 @@ pdlp_settings:
     # cpp/include/cuopt/mathematical_optimization/pdlp/pdlp_hyper_params.cuh.
   - hyper_params:
     - do_curtis_reid_scaling:
+        param_name: pdlp_hyper_enable_curtis_reid_scaling
         description: >-
           Whether Curtis-Reid prescaling runs before Ruiz/Pock-Chambolle
           matrix scaling.
@@ -837,9 +860,8 @@ pdlp_settings:
 mip_settings:
   cpp_type: "mip_solver_settings_t<i_t, f_t>"
   proto_type: "cuopt::remote::MIPSolverSettings"
-  # See pdlp_settings.deprecate_parameters. presolve_absolute_tolerance is
-  # not a set_parameter() setting (param_name: null) and stays a typed field.
-  deprecate_parameters: true
+  # See pdlp_settings.parameter_map. presolve_absolute_tolerance is not a
+  # set_parameter() setting (param_name: null) and stays a typed field.
   parameter_map:
     name: parameters
     field_num: 60
@@ -968,8 +990,8 @@ mip_settings:
       param_name: mip_symmetry
       # Symmetry-detection level (dejavu). Valid: -1 (default), 0 (off),
       # 1 (orbital fixing), 2 (orbital fixing + lexical reduction). The
-      # mapper clamps out-of-range values to -1 to match the local-solve
-      # range check in cpp/src/math_optimization/solver_settings.cu.
+      # deprecated path calls set_parameter(), which rejects a value outside
+      # the range registered in cpp/src/math_optimization/solver_settings.cu.
       description: >-
         Symmetry detection and handling. -1 automatic, 0 disabled, 1 orbital
         fixing, 2 orbital fixing plus lexical reduction.

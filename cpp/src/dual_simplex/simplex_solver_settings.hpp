@@ -68,7 +68,7 @@ struct simplex_solver_settings_t {
       eliminate_singletons(true),
       print_presolve_stats(true),
       barrier_presolve(false),
-      barrier_presolve_eliminate_free_variables(-1),
+      barrier_eliminate_free_variables(true),
       cudss_deterministic(false),
       cudss_nd_nlevels(-1),
       cudss_hybrid_execute_mode(-1),
@@ -92,7 +92,7 @@ struct simplex_solver_settings_t {
       initial_perturbation(-1),
       remove_perturbation(-1),
       primal_pricing(1),
-      barrier_initial_point(barrier_initial_point_t::Automatic),
+      barrier_dual_initial_point(barrier_dual_initial_point_t::Automatic),
       postsolve_info(-1),
       barrier_presolve_bound_free_variables(-1),
       qcqp_ruiz_equilibration(-1),
@@ -115,6 +115,9 @@ struct simplex_solver_settings_t {
       strong_chvatal_gomory_cuts(-1),
       symmetry(-1),
       reduced_cost_strengthening(-1),
+      dual_degenerate_feasibility_pump(0),
+      primal_degenerate_pivots(1),
+      dual_degenerate_pivots(0),
       cut_change_threshold(1e-3),
       cut_min_orthogonality(0.5),
       mip_batch_pdlp_strong_branching(0),
@@ -178,12 +181,10 @@ struct simplex_solver_settings_t {
   bool relaxation;                 // true to only solve the LP relaxation of a MIP
   bool
     use_left_looking_lu;  // true to use left looking LU factorization, false to use right looking
-  bool eliminate_singletons;  // true to eliminate singletons from the basis
-  bool print_presolve_stats;  // true to print presolve stats
-  bool barrier_presolve;      // true to use barrier presolve
-  // Substitute out zero-cost free variables in barrier presolve (QP/SOCP only):
-  // -1 automatic (on, off when the solve feeds a barrier cache), 0 disabled, 1 enabled
-  i_t barrier_presolve_eliminate_free_variables;
+  bool eliminate_singletons;              // true to eliminate singletons from the basis
+  bool print_presolve_stats;              // true to print presolve stats
+  bool barrier_presolve;                  // true to use barrier presolve
+  bool barrier_eliminate_free_variables;  // true to eliminate zero-cost free variables
   bool cudss_deterministic;  // true to use cuDSS deterministic mode, false for non-deterministic
   i_t cudss_nd_nlevels;      // -1 automatic/unset, else METIS nested-dissection depth for cuDSS
   i_t cudss_hybrid_execute_mode;  // -1 unset (cuDSS default, off), 0 off, 1 on
@@ -214,16 +215,17 @@ struct simplex_solver_settings_t {
   i_t augmented;  // -1 automatic, 0 to solve with ADAT, 1 to solve with augmented system
   i_t dualize;    // -1 automatic, 0 to not dualize, 1 to dualize
   i_t ordering;   // -1 automatic, 0 to use nested dissection, 1 to use AMD
-  i_t initial_perturbation;                       // -1 automatic, 0 to not perturb, 1 to perturb
-  i_t remove_perturbation;                        // -1 automatic, 0 disabled, 1 enabled
-  i_t primal_pricing;                             // 0 Dantzig (default), 1 Devex
-  barrier_initial_point_t barrier_initial_point;  // -1 automatic, 0 Lustig-Marsten-Shanno,
-                                                  // 1 dual least squares, 2 SeDuMi mu-based
-  i_t postsolve_info;                             // -1 automatic (disabled), 0 disabled, 1 enabled
-  i_t barrier_presolve_bound_free_variables;      // -1 automatic, 0 disabled, 1 enabled
+  i_t initial_perturbation;  // -1 automatic, 0 to not perturb, 1 to perturb
+  i_t remove_perturbation;   // -1 automatic, 0 disabled, 1 enabled
+  i_t primal_pricing;        // 0 Dantzig, 1 Devex (default)
+  barrier_dual_initial_point_t
+    barrier_dual_initial_point;               // -1 automatic, 0 Lustig-Marsten-Shanno,
+                                              // 1 dual least squares, 2 SeDuMi mu-based
+  i_t postsolve_info;                         // -1 automatic (disabled), 0 disabled, 1 enabled
+  i_t barrier_presolve_bound_free_variables;  // -1 automatic, 0 disabled, 1 enabled
   i_t qcqp_ruiz_equilibration;          // -1 automatic (imbalance heuristic), 0 disabled, 1 enabled
-  i_t gpu_ruiz_nnz_threshold;           // nnz(A)+nnz(Q) above which the barrier path's Ruiz
-                                        // equilibration runs on GPU instead of CPU.
+  i_t gpu_ruiz_nnz_threshold;           // nnz(A)+nnz(Q) at or above which barrier Ruiz runs on
+                                        // GPU instead of CPU
   f_t barrier_initial_point_safeguard;  // margin pushing the barrier initial iterate into
   // the interior of the nonnegative orthant / SOC
   bool check_Q;                    // true to check if Q is positive semidefinite
@@ -245,10 +247,13 @@ struct simplex_solver_settings_t {
   i_t strong_chvatal_gomory_cuts;  // -1 automatic, 0 to disable, >0 to enable strong Chvatal Gomory
                                    // cuts
   i_t symmetry;  // -1 automatic, 0 to disable, >0 to enable different symmetry methods
-  i_t reduced_cost_strengthening;  // -1 automatic, 0 to disable, >0 to enable reduced cost
-                                   // strengthening
-  f_t cut_change_threshold;        // threshold for cut change
-  f_t cut_min_orthogonality;       // minimum orthogonality for cuts
+  i_t reduced_cost_strengthening;        // -1 automatic, 0 to disable, >0 to enable reduced cost
+                                         // strengthening
+  i_t dual_degenerate_feasibility_pump;  // 0 to disable, 1 to enable
+  i_t primal_degenerate_pivots;          // 0 to disable, 1 to enable
+  i_t dual_degenerate_pivots;            // 0 = off, 1 = root/dives, 2 = everywhere
+  f_t cut_change_threshold;              // threshold for cut change
+  f_t cut_min_orthogonality;             // minimum orthogonality for cuts
   i_t
     mip_batch_pdlp_strong_branching;  // 0 = DS only, 1 = cooperative DS + PDLP, 2 = batch PDLP only
   i_t mip_batch_pdlp_reliability_branching;  // 0 = DS only, 1 = cooperative DS + PDLP, 2 = batch
