@@ -262,8 +262,8 @@ cusparse_view_t<i_t, f_t>::cusparse_view_t(raft::handle_t const* handle_ptr,
 
   rmm::device_uvector<f_t> d_x(cols, handle_ptr_->get_stream());
   rmm::device_uvector<f_t> d_y(rows, handle_ptr_->get_stream());
-  auto x = pdlp::make_dnvec<f_t>(d_x.size(), d_x.data());
-  auto y = pdlp::make_dnvec<f_t>(d_y.size(), d_y.data());
+  auto x             = pdlp::make_dnvec<f_t>(d_x.size(), d_x.data());
+  auto y             = pdlp::make_dnvec<f_t>(d_y.size(), d_y.data());
   beta_bug_possible_ = alg2_beta_bug_possible(csr.row_start, handle_ptr_->get_stream());
   init_spmv_buffer_and_preprocess(A_.get(), x.get(), y.get(), spmv_buffer_, beta_bug_possible_);
 }

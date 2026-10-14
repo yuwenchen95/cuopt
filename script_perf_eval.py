@@ -20,7 +20,8 @@ Environment:
 
 Run with conda env ``py313`` activated.
 
-Examples:
+Examples
+--------
   python script_perf_eval.py --mode baseline   # session disabled, one process
   python script_perf_eval.py --mode session    # session enabled, one process
   python script_perf_eval.py --mode all        # baseline then session (new process each)
@@ -888,7 +889,6 @@ def run_single_benchmark(mode: str) -> dict:
         "yes",
     )
     n_warm = int(os.environ.get("CUOPT_CACHE_BENCHMARK_WARM", "5"))
-    obj_atol = float(os.environ.get("CUOPT_OBJ_VERIFY_ATOL", "1e-6"))
     formula_atol = float(os.environ.get("CUOPT_FORMULA_VERIFY_ATOL", "1e-4"))
 
     print("\nBuilding cuOpt Problem...")
